@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/fenics/dolfinx:stable
+FROM quay.io/fenicsproject/dolfinx:stable
 
 # Set working directory inside container
 WORKDIR /app
