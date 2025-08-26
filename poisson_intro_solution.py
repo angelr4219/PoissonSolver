@@ -1,64 +1,57 @@
-# poisson_mms_fenicsx.py
+# poisson_mms.py
 from mpi4py import MPI
 import numpy as np
 import ufl
 from dolfinx import mesh, fem, io
-from dolfinx.fem import Function
 from dolfinx.fem.petsc import LinearProblem
 
-comm = MPI.COMM_WORLD
+def poisson_mms(Nx: int = 64, Ny: int = 64):
+    """
+    MMS: Solve −Δu = f with f = −6, exact Dirichlet u_e = 1 + x^2 + 2y^2 on all boundaries.
+    Returns the FE solution uh (dolfinx.fem.Function).
+    """
+    comm = MPI.COMM_WORLD
+    domain = mesh.create_unit_square(comm, Nx, Ny, mesh.CellType.triangle)
 
-# --- Mesh ---
-Nx = Ny = 64
-domain = mesh.create_unit_square(comm, Nx, Ny, mesh.CellType.triangle)
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
 
-# --- FE space ---
-V = fem.functionspace(domain, ("Lagrange", 1))
-u = ufl.TrialFunction(V)
-v = ufl.TestFunction(V)
+    x = ufl.SpatialCoordinate(domain)
+    u_exact_expr = 1 + x[0]**2 + 2*x[1]**2
+    f_expr = fem.Constant(domain, -6.0)
 
-# --- Exact solution u_e and f = -6 ---
-x = ufl.SpatialCoordinate(domain)
-u_exact_expr = 1 + x[0]**2 + 2*x[1]**2
-f_expr = fem.Constant(domain, -6.0)
+    # Interpolate exact solution onto V for BCs
+    u_D = fem.Function(V)
+    u_D.interpolate(fem.Expression(u_exact_expr, V.element.interpolation_points()))
 
-# --- Dirichlet BC on all boundaries: u = u_e ---
-u_D = fem.Function(V)
-u_D_expr = fem.Expression(u_exact_expr, V.element.interpolation_points())
-u_D.interpolate(u_D_expr)
+    def on_boundary(X):
+        tol = 1e-14
+        return np.isclose(X[0], 0.0, atol=tol) | np.isclose(X[0], 1.0, atol=tol) | \
+               np.isclose(X[1], 0.0, atol=tol) | np.isclose(X[1], 1.0, atol=tol)
 
-def on_boundary(x):
-    tol = 1e-14
-    return np.isclose(x[0], 0.0, atol=tol) | np.isclose(x[0], 1.0, atol=tol) | \
-           np.isclose(x[1], 0.0, atol=tol) | np.isclose(x[1], 1.0, atol=tol)
+    fdim = domain.topology.dim - 1
+    facets = mesh.locate_entities_boundary(domain, fdim, on_boundary)
+    dofs = fem.locate_dofs_topological(V, fdim, facets)
+    bc = fem.dirichletbc(u_D, dofs)
 
-facets = mesh.locate_entities_boundary(domain, domain.topology.dim-1, on_boundary)
-dofs = fem.locate_dofs_topological(V, domain.topology.dim-1, facets)
-bc = fem.dirichletbc(u_D, dofs)
+    a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    L = f_expr * v * ufl.dx
 
-# --- Weak form: ∫ ∇u·∇v dx = ∫ f v dx
-a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
-L = f_expr * v * ufl.dx
+    uh = LinearProblem(a, L, bcs=[bc]).solve()
 
-problem = LinearProblem(a, L, bcs=[bc])
-uh = problem.solve()
+    # Optional: write XDMF + quick error print
+    with io.XDMFFile(comm, "mms_solution.xdmf", "w") as xdmf:
+        xdmf.write_mesh(domain); xdmf.write_function(uh)
 
-# --- Error norms ---
-# L2: ||u - u_e||_L2
-u_exact = fem.Function(V)
-u_exact.interpolate(u_D_expr)
+    # L2 and nodal “max” errors (for sanity)
+    u_exact = fem.Function(V); u_exact.interpolate(fem.Expression(u_exact_expr, V.element.interpolation_points()))
+    e = fem.Function(V); e.x.array[:] = uh.x.array - u_exact.x.array
+    L2_err = (fem.assemble_scalar(fem.form(e*e*ufl.dx)))**0.5
+    if comm.rank == 0:
+        print(f"[MMS] L2 error = {L2_err:.6e}, nodal max = {np.max(np.abs(e.x.array)):.6e}")
 
-e = fem.Function(V)
-e.x.array[:] = uh.x.array - u_exact.x.array
-L2_error = np.sqrt(fem.assemble_scalar(fem.form(e*e*ufl.dx)))
-# "Max" error at nodal points (FE L∞ proxy)
-max_error = np.max(np.abs(e.x.array))
+    return uh
 
-if comm.rank == 0:
-    print(f"L2 error: {L2_error:.6e}, max (nodal) error: {max_error:.6e}")
-
-# --- Save ---
-with io.XDMFFile(comm, "mms_solution.xdmf", "w") as xdmf:
-    xdmf.write_mesh(domain)
-    xdmf.write_function(uh)
-
+if __name__ == "__main__":
+    poisson_mms()
