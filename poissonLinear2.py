@@ -1,4 +1,4 @@
-# poisson_linear.py
+# poisson_linear2.py
 from mpi4py import MPI
 import numpy as np
 import ufl
