@@ -30,17 +30,17 @@ def solve_poisson_gates_var_eps(
     # --- Rectangular holes (gates)
     xA, yA, wA, hA = gateA
     xB, yB, wB, hB = gateB
-    hA_tag = gmsh.model.occ.addRectangle(xA, yA, 0.0, wA, hA)
-    hB_tag = gmsh.model.occ.addRectangle(xB, yB, 0.0, wB, hB)
-    gmsh.model.occ.cut([(2, outer)], [(2, hA_tag), (2, hB_tag)],
+    holeA = gmsh.model.occ.addRectangle(xA, yA, 0.0, wA, hA)
+    holeB = gmsh.model.occ.addRectangle(xB, yB, 0.0, wB, hB)
+    gmsh.model.occ.cut([(2, outer)], [(2, holeA), (2, holeB)],
                        removeObject=True, removeTool=True)
 
-    # --- Top oxide strip (NOT a hole)
+    # --- Top oxide strip (NOT a hole); fragment to split materials
     oxide_strip = gmsh.model.occ.addRectangle(0.0, oxide_ymin, 0.0, Lx, Ly - oxide_ymin)
     gmsh.model.occ.fragment(gmsh.model.occ.getEntities(2), [(2, oxide_strip)])
     gmsh.model.occ.synchronize()
 
-    # Classify surfaces by centroid y
+    # --- Classify surfaces by centroid y (top = oxide, bottom = semiconductor)
     def cy(tag):
         xmin, ymin, _, xmax, ymax, _ = gmsh.model.getBoundingBox(2, tag)
         return 0.5 * (ymin + ymax)
@@ -49,56 +49,54 @@ def solve_poisson_gates_var_eps(
     top_surf_tags = [s for s in surfs if cy(s) > (oxide_ymin - 0.05)]
     bot_surf_tags = [s for s in surfs if s not in top_surf_tags]
 
-    # Collect all boundary curves
-    curves = gmsh.model.getBoundary([(2, t) for t in top_surf_tags + bot_surf_tags],
-                                    oriented=False, recursive=True)
-    curves = [c for c in curves if c[0] == 1]
+    # --- All boundary curves of the material surfaces
+    all_curves = gmsh.model.getBoundary([(2, t) for t in top_surf_tags + bot_surf_tags],
+                                        oriented=False, recursive=True)
+    all_curves = [c[1] for c in all_curves if c[0] == 1]  # keep only dim=1 tags
 
-    def cxy(curve):
-        xmin, ymin, _, xmax, ymax, _ = gmsh.model.getBoundingBox(curve[0], curve[1])
-        return 0.5*(xmin+xmax), 0.5*(ymin+ymax)
+    # --- Robustly pick gate perimeters via bounding boxes around gate rectangles
+    pad = 1e-8
+    gateA_bbox = (xA - pad, yA - pad, -pad, xA + wA + pad, yA + hA + pad, +pad)
+    gateB_bbox = (xB - pad, yB - pad, -pad, xB + wB + pad, yB + hB + pad, +pad)
 
-    outer_curves, gateA_curves, gateB_curves = [], [], []
-    for c in curves:
-        cx, cyv = cxy(c)
-        if cyv > yA - 1e-6 and (xA - 1e-6) <= cx <= (xA + wA + 1e-6):
-            gateA_curves.append(c[1])
-        elif cyv > yB - 1e-6 and (xB - 1e-6) <= cx <= (xB + wB + 1e-6):
-            gateB_curves.append(c[1])
-        else:
-            outer_curves.append(c[1])
+    gateA_curves_raw = [tag for (_, tag) in gmsh.model.getEntitiesInBoundingBox(*gateA_bbox, 1)]
+    gateB_curves_raw = [tag for (_, tag) in gmsh.model.getEntitiesInBoundingBox(*gateB_bbox, 1)]
 
-    outer_tags = sorted(set(outer_curves))
-    gateA_tags = sorted(set(gateA_curves))
-    gateB_tags = sorted(set(gateB_curves))
+    # Intersect with actual boundary curves to avoid picking unrelated lines
+    all_set = set(all_curves)
+    gateA_curves = sorted(all_set.intersection(gateA_curves_raw))
+    gateB_curves = sorted(all_set.intersection(gateB_curves_raw))
+    outer_curves = sorted(all_set.difference(gateA_curves).difference(gateB_curves))
 
-    # Physical groups
-    pg_outer = gmsh.model.addPhysicalGroup(1, outer_tags); gmsh.model.setPhysicalName(1, pg_outer, "outer")
-    pg_gateA = gmsh.model.addPhysicalGroup(1, gateA_tags); gmsh.model.setPhysicalName(1, pg_gateA, "gateA")
-    pg_gateB = gmsh.model.addPhysicalGroup(1, gateB_tags); gmsh.model.setPhysicalName(1, pg_gateB, "gateB")
+    # --- Physical groups (boundaries)
+    pg_outer = gmsh.model.addPhysicalGroup(1, outer_curves); gmsh.model.setPhysicalName(1, pg_outer, "outer")
+    pg_gateA = gmsh.model.addPhysicalGroup(1, gateA_curves); gmsh.model.setPhysicalName(1, pg_gateA, "gateA")
+    pg_gateB = gmsh.model.addPhysicalGroup(1, gateB_curves); gmsh.model.setPhysicalName(1, pg_gateB, "gateB")
+
+    # --- Physical groups (materials)
     pg_semic = gmsh.model.addPhysicalGroup(2, bot_surf_tags); gmsh.model.setPhysicalName(2, pg_semic, "semiconductor")
     pg_oxide = gmsh.model.addPhysicalGroup(2, top_surf_tags); gmsh.model.setPhysicalName(2, pg_oxide, "oxide")
 
-    # Mesh size and generate
+    # --- Mesh controls
     gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h)
     gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h)
     gmsh.model.mesh.generate(2)
 
-    # To DOLFINx
+    # --- To DOLFINx
     domain, cell_tags, facet_tags = gmshio.model_to_mesh(gmsh.model, comm, rank, gdim=2)
     gmsh.finalize()
 
-    # >>> IMPORTANT: build connectivity for BC lookup <<<
+    # >>> Ensure facet<->cell connectivity for BC lookup <<<
     tdim = domain.topology.dim
     fdim = tdim - 1
     domain.topology.create_connectivity(fdim, tdim)
     domain.topology.create_connectivity(tdim, fdim)
 
-    # Spaces
+    # --- FE spaces
     V = fem.functionspace(domain, ("Lagrange", 1))
     W = fem.functionspace(domain, ("DG", 0))  # ε(x) cell-wise constants
 
-    # ε(x) on DG0
+    # --- ε(x) on DG0 (default: semiconductor; overwrite oxide cells)
     eps0 = 8.8541878128e-12
     eps = fem.Function(W)
     eps.x.array[:] = eps0 * eps_r_semic
@@ -106,13 +104,12 @@ def solve_poisson_gates_var_eps(
     eps.x.array[oxide_cells] = eps0 * eps_r_oxide
     eps.name = "epsilon"
 
-    # Source (Laplace)
+    # --- Source (Laplace)
     rho = fem.Constant(domain, 0.0)
 
-    # Dirichlet BCs on gate perimeters
+    # --- Dirichlet BCs on gate perimeters
     def dirichlet_on(tag, value):
-        facets = facet_tags.find(tag)                 # <-- use .find(tag)
-        # Debug: print how many facets we found for this tag
+        facets = facet_tags.find(tag)
         if rank == 0:
             print(f"[debug] tag {tag}: {len(facets)} facets")
         dofs = fem.locate_dofs_topological(V, fdim, facets)
@@ -121,7 +118,7 @@ def solve_poisson_gates_var_eps(
     bcs = [dirichlet_on(pg_gateA, VgateA),
            dirichlet_on(pg_gateB, VgateB)]
 
-    # Weak form: -∇·(ε ∇φ) = ρ
+    # --- Weak form: -∇·(ε ∇φ) = ρ
     phi = ufl.TrialFunction(V)
     v   = ufl.TestFunction(V)
     a = ufl.inner(eps * ufl.grad(phi), ufl.grad(v)) * ufl.dx
@@ -133,7 +130,7 @@ def solve_poisson_gates_var_eps(
     if rank == 0:
         print(f"[gates] phi: min={uh.x.array.min():.4g} V, max={uh.x.array.max():.4g} V")
 
-    # Write results
+    # --- Write results
     with XDMFFile(comm, outfile, "w") as xdmf:
         xdmf.write_mesh(domain)
         xdmf.write_function(uh)
@@ -164,6 +161,7 @@ def _cli():
         VgateA=args.VgateA, VgateB=args.VgateB,
         h=args.h, outfile=args.outfile
     )
+
 
 if __name__ == "__main__":
     _cli()
