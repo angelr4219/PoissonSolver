@@ -1,146 +1,169 @@
-# --- Poisson with rectangular gates + variable permittivity by subdomain ---
-# Adds a top "oxide" strip (e.g., y in [0.8, 1.0]) and the rest "semiconductor".
-# Keep your previous imports; only the CAD/build section and eps definition change.
-
+# Extended-PS.py
 from mpi4py import MPI
-import gmsh, numpy as np, ufl
+import argparse
+import numpy as np
+import ufl, gmsh
 from dolfinx import fem
-from dolfinx.io import gmshio
+from dolfinx.io import gmshio, XDMFFile
 from dolfinx.fem.petsc import LinearProblem
 
-comm = MPI.COMM_WORLD
-rank = comm.rank
 
-gmsh.initialize()
-gmsh.model.add("rect-with-holes-materials")
+def solve_poisson_gates_var_eps(
+    Lx=1.0, Ly=1.0,
+    oxide_ymin=0.80,
+    gateA=(0.15, 0.75, 0.20, 0.20),   # (x0, y0, w, h)
+    gateB=(0.55, 0.75, 0.30, 0.20),
+    eps_r_semic=11.7, eps_r_oxide=3.9,
+    VgateA=0.20, VgateB=0.00,
+    h=0.03,
+    outfile="phi_with_gates_var_eps.xdmf"
+):
+    comm = MPI.COMM_WORLD
+    rank = comm.rank
 
-# --- Outer domain
-Lx, Ly = 1.0, 1.0
-outer = gmsh.model.occ.addRectangle(0.0, 0.0, 0.0, Lx, Ly)
+    gmsh.initialize()
+    gmsh.model.add("rect-with-holes-materials")
 
-# --- Holes (gates)
-hA = gmsh.model.occ.addRectangle(0.15, 0.75, 0.0, 0.20, 0.20)
-hB = gmsh.model.occ.addRectangle(0.55, 0.75, 0.0, 0.30, 0.20)
+    # --- Outer domain
+    outer = gmsh.model.occ.addRectangle(0.0, 0.0, 0.0, Lx, Ly)
 
-# Subtract holes to create inner boundaries
-gmsh.model.occ.cut([(2, outer)], [(2, hA), (2, hB)], removeObject=True, removeTool=True)
+    # --- Rectangular holes (gates)
+    xA, yA, wA, hA = gateA
+    xB, yB, wB, hB = gateB
+    hA_tag = gmsh.model.occ.addRectangle(xA, yA, 0.0, wA, hA)
+    hB_tag = gmsh.model.occ.addRectangle(xB, yB, 0.0, wB, hB)
+    gmsh.model.occ.cut([(2, outer)], [(2, hA_tag), (2, hB_tag)],
+                       removeObject=True, removeTool=True)
 
-# --- Add a top "oxide" strip (this is NOT a hole; we keep material there)
-oxide_strip = gmsh.model.occ.addRectangle(0.0, 0.80, 0.0, 1.0, 0.20)
+    # --- Top oxide strip (NOT a hole)
+    oxide_strip = gmsh.model.occ.addRectangle(0.0, oxide_ymin, 0.0, Lx, Ly - oxide_ymin)
+    gmsh.model.occ.fragment(gmsh.model.occ.getEntities(2), [(2, oxide_strip)])
+    gmsh.model.occ.synchronize()
 
-# Fragment the current surface with the oxide rectangle to split materials
-gmsh.model.occ.fragment(gmsh.model.occ.getEntities(2), [(2, oxide_strip)])
-gmsh.model.occ.synchronize()
+    # Classify surfaces by centroid y
+    def cy(tag):
+        xmin, ymin, _, xmax, ymax, _ = gmsh.model.getBoundingBox(2, tag)
+        return 0.5 * (ymin + ymax)
 
-# Collect final 2D surfaces (should be 2: bottom+top), and classify by centroid y
-surfs = gmsh.model.getEntities(dim=2)
-assert len(surfs) >= 2
+    surfs = [s for (dim, s) in gmsh.model.getEntities(2)]
+    top_surf_tags = [s for s in surfs if cy(s) > (oxide_ymin - 0.05)]
+    bot_surf_tags = [s for s in surfs if s not in top_surf_tags]
 
-def centroid_of_surface(tag):
-    xmin, ymin, _, xmax, ymax, _ = gmsh.model.getBoundingBox(2, tag)
-    return 0.5*(xmin+xmax), 0.5*(ymin+ymax)
+    # Collect all boundary curves
+    curves = gmsh.model.getBoundary([(2, t) for t in top_surf_tags + bot_surf_tags],
+                                    oriented=False, recursive=True)
+    curves = [c for c in curves if c[0] == 1]
 
-top_surf_tags, bot_surf_tags = [], []
-for _, s in surfs:
-    cx, cy = centroid_of_surface(s)
-    # The small hole faces do not exist (holes were cut), so remaining are the two material patches.
-    if cy > 0.7:
-        top_surf_tags.append(s)   # oxide region
-    else:
-        bot_surf_tags.append(s)   # semiconductor region
+    def cxy(curve):
+        xmin, ymin, _, xmax, ymax, _ = gmsh.model.getBoundingBox(curve[0], curve[1])
+        return 0.5*(xmin+xmax), 0.5*(ymin+ymax)
 
-# --- Tag boundaries: outer vs hole boundaries (gateA/gateB)
-# Get ALL boundary curves; separate hole perimeters (high y) from outer
-curves = gmsh.model.getBoundary([(2, t) for t in top_surf_tags + bot_surf_tags],
-                                oriented=False, recursive=True)
+    outer_curves, gateA_curves, gateB_curves = [], [], []
+    for c in curves:
+        cx, cyv = cxy(c)
+        if cyv > yA - 1e-6 and (xA - 1e-6) <= cx <= (xA + wA + 1e-6):
+            gateA_curves.append(c[1])
+        elif cyv > yB - 1e-6 and (xB - 1e-6) <= cx <= (xB + wB + 1e-6):
+            gateB_curves.append(c[1])
+        else:
+            outer_curves.append(c[1])
 
-def bbox_of_curve(curve):
-    return gmsh.model.getBoundingBox(curve[0], curve[1])
+    outer_tags = sorted(set(outer_curves))
+    gateA_tags = sorted(set(gateA_curves))
+    gateB_tags = sorted(set(gateB_curves))
 
-outer_curves, gateA_curves, gateB_curves = [], [], []
-for c in curves:
-    if c[0] != 1:
-        continue
-    xmin, ymin, _, xmax, ymax, _ = bbox_of_curve(c)
-    cx, cy = 0.5*(xmin+xmax), 0.5*(ymin+ymax)
-    # Heuristic: gate perimeters are high in y and lie under either hole A (x<0.5) or B (x>0.5)
-    if cy > 0.7 and 0.15 - 1e-6 <= cx <= 0.35 + 1e-6:
-        gateA_curves.append(c)
-    elif cy > 0.7 and 0.55 - 1e-6 <= cx <= 0.85 + 1e-6:
-        gateB_curves.append(c)
-    else:
-        outer_curves.append(c)
+    # Physical groups
+    pg_outer = gmsh.model.addPhysicalGroup(1, outer_tags); gmsh.model.setPhysicalName(1, pg_outer, "outer")
+    pg_gateA = gmsh.model.addPhysicalGroup(1, gateA_tags); gmsh.model.setPhysicalName(1, pg_gateA, "gateA")
+    pg_gateB = gmsh.model.addPhysicalGroup(1, gateB_tags); gmsh.model.setPhysicalName(1, pg_gateB, "gateB")
+    pg_semic = gmsh.model.addPhysicalGroup(2, bot_surf_tags); gmsh.model.setPhysicalName(2, pg_semic, "semiconductor")
+    pg_oxide = gmsh.model.addPhysicalGroup(2, top_surf_tags); gmsh.model.setPhysicalName(2, pg_oxide, "oxide")
 
-# Deduplicate curve tags
-outer_tags = list({tag for (_, tag) in outer_curves})
-gateA_tags = list({tag for (_, tag) in gateA_curves})
-gateB_tags = list({tag for (_, tag) in gateB_curves})
+    # Mesh size and generate
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h)
+    gmsh.model.mesh.generate(2)
 
-# --- Physical groups
-pg_outer = gmsh.model.addPhysicalGroup(1, outer_tags, name="outer")
-pg_gateA = gmsh.model.addPhysicalGroup(1, gateA_tags, name="gateA")
-pg_gateB = gmsh.model.addPhysicalGroup(1, gateB_tags, name="gateB")
+    # To DOLFINx
+    domain, cell_tags, facet_tags = gmshio.model_to_mesh(gmsh.model, comm, rank, gdim=2)
+    gmsh.finalize()
 
-# Material (cell) groups
-pg_semic = gmsh.model.addPhysicalGroup(2, bot_surf_tags, name="semiconductor")
-pg_oxide = gmsh.model.addPhysicalGroup(2, top_surf_tags, name="oxide")
+    # >>> IMPORTANT: build connectivity for BC lookup <<<
+    tdim = domain.topology.dim
+    fdim = tdim - 1
+    domain.topology.create_connectivity(fdim, tdim)
+    domain.topology.create_connectivity(tdim, fdim)
 
-# Mesh and convert
-gmsh.model.mesh.generate(2)
-domain, cell_tags, facet_tags = gmshio.model_to_mesh(gmsh.model, comm, rank, gdim=2)
-gmsh.finalize()
+    # Spaces
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    W = fem.functionspace(domain, ("DG", 0))  # ε(x) cell-wise constants
 
-# ----------------------------
-# FE spaces
-# ----------------------------
-V = fem.functionspace(domain, ("Lagrange", 1))
-W = fem.functionspace(domain, ("DG", 0))  # cell-wise constants for epsilon
+    # ε(x) on DG0
+    eps0 = 8.8541878128e-12
+    eps = fem.Function(W)
+    eps.x.array[:] = eps0 * eps_r_semic
+    oxide_cells = cell_tags.find(pg_oxide)            # local cell indices tagged as oxide
+    eps.x.array[oxide_cells] = eps0 * eps_r_oxide
+    eps.name = "epsilon"
 
-# --- Permittivities
-eps0 = 8.8541878128e-12
-eps_r_oxide = 3.9
-eps_r_semic = 11.7  # e.g., Si; change as needed
+    # Source (Laplace)
+    rho = fem.Constant(domain, 0.0)
 
-eps_vals = np.full(len(cell_tags.values), eps0 * eps_r_semic)
-# Overwrite oxide cells
-oxide_cells = np.where(cell_tags.values == pg_oxide)[0]
-eps_vals[oxide_cells] = eps0 * eps_r_oxide
+    # Dirichlet BCs on gate perimeters
+    def dirichlet_on(tag, value):
+        facets = facet_tags.find(tag)                 # <-- use .find(tag)
+        # Debug: print how many facets we found for this tag
+        if rank == 0:
+            print(f"[debug] tag {tag}: {len(facets)} facets")
+        dofs = fem.locate_dofs_topological(V, fdim, facets)
+        return fem.dirichletbc(fem.Constant(domain, value), dofs, V)
 
-# Put into a DG0 function (cell-wise ε)
-eps = fem.Function(W)
-eps.x.array[:] = eps_vals
+    bcs = [dirichlet_on(pg_gateA, VgateA),
+           dirichlet_on(pg_gateB, VgateB)]
 
-# --- Source (volume charge); start with Laplace
-rho = fem.Constant(domain, 0.0)
+    # Weak form: -∇·(ε ∇φ) = ρ
+    phi = ufl.TrialFunction(V)
+    v   = ufl.TestFunction(V)
+    a = ufl.inner(eps * ufl.grad(phi), ufl.grad(v)) * ufl.dx
+    L = rho * v * ufl.dx
 
-# --- Dirichlet on gate hole boundaries
-import numpy as np
-ft = facet_tags
+    uh = LinearProblem(a, L, bcs=bcs).solve()
+    uh.name = "phi"
 
-def dirichlet_on(tag, value):
-    dofs = fem.locate_dofs_topological(V, ft.dim, np.where(ft.values == tag)[0])
-    return fem.dirichletbc(fem.Constant(domain, value), dofs, V)
+    if rank == 0:
+        print(f"[gates] phi: min={uh.x.array.min():.4g} V, max={uh.x.array.max():.4g} V")
 
-VgateA, VgateB = 0.20, 0.00
-bcs = [dirichlet_on(pg_gateA, VgateA), dirichlet_on(pg_gateB, VgateB)]
+    # Write results
+    with XDMFFile(comm, outfile, "w") as xdmf:
+        xdmf.write_mesh(domain)
+        xdmf.write_function(uh)
+        xdmf.write_function(eps)
 
-# --- Variational problem: -div( ε ∇φ ) = ρ
-phi = ufl.TrialFunction(V)
-v   = ufl.TestFunction(V)
+    return uh
 
-a = ufl.inner(eps * ufl.grad(phi), ufl.grad(v)) * ufl.dx
-L = rho * v * ufl.dx
 
-uh = LinearProblem(a, L, bcs=bcs).solve()
+def _cli():
+    p = argparse.ArgumentParser(description="Poisson with rectangular gates + variable permittivity")
+    p.add_argument("--Lx", type=float, default=1.0)
+    p.add_argument("--Ly", type=float, default=1.0)
+    p.add_argument("--oxide_ymin", type=float, default=0.80)
+    p.add_argument("--gateA", type=float, nargs=4, default=[0.15, 0.75, 0.20, 0.20], metavar=("x0","y0","w","h"))
+    p.add_argument("--gateB", type=float, nargs=4, default=[0.55, 0.75, 0.30, 0.20], metavar=("x0","y0","w","h"))
+    p.add_argument("--eps_r_semic", type=float, default=11.7)
+    p.add_argument("--eps_r_oxide", type=float, default=3.9)
+    p.add_argument("--VgateA", type=float, default=0.20)
+    p.add_argument("--VgateB", type=float, default=0.00)
+    p.add_argument("--h", type=float, default=0.03)
+    p.add_argument("--outfile", type=str, default="phi_with_gates_var_eps.xdmf")
+    args = p.parse_args()
 
-# Quick check
-if rank == 0:
-    print(f"phi: min={uh.x.array.min():.4g} V, max={uh.x.array.max():.4g} V")
+    solve_poisson_gates_var_eps(
+        Lx=args.Lx, Ly=args.Ly, oxide_ymin=args.oxide_ymin,
+        gateA=tuple(args.gateA), gateB=tuple(args.gateB),
+        eps_r_semic=args.eps_r_semic, eps_r_oxide=args.eps_r_oxide,
+        VgateA=args.VgateA, VgateB=args.VgateB,
+        h=args.h, outfile=args.outfile
+    )
 
-# Save (mesh + field + cell_tags) for ParaView
-from dolfinx.io import XDMFFile
-with XDMFFile(comm, "phi_with_gates_var_eps.xdmf", "w") as xdmf:
-    xdmf.write_mesh(domain)
-    xdmf.write_function(uh)
-    # Also write the DG0 epsilon as a scalar field for visual verification
-    xdmf.write_function(eps, "epsilon")
+if __name__ == "__main__":
+    _cli()

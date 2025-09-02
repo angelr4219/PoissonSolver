@@ -2,6 +2,8 @@
 import argparse
 import numpy as np
 
+from Extended-PS import solve_poisson_gates_var_eps
+
 # ---- Your modules ----
 from poisson_linear import poisson_linear  # FEniCSx linear solver (returns dolfinx Function)
 
@@ -132,6 +134,11 @@ def main():
     p.add_argument("--max_iter", type=int, default=50)
     p.add_argument("--rtol", type=float, default=1e-5)
     p.add_argument("--damp", type=float, default=1.0)
+    
+    p.add_argument("--mode", choices=["mms", "linear", "linear-fd", "dos", "gates"], default="linear")
+    p.add_argument("--h", type=float, default=0.03, help="Target mesh size for Gmsh (gates mode)")
+    p.add_argument("--eps_r_semic", type=float, default=11.7)
+
 
     args = p.parse_args()
 
@@ -143,6 +150,26 @@ def main():
         run_linear_fd(args)
     elif args.mode == "dos":
         run_dos(args)
+    elif args.mode == "gates":
+        run_gates(args)
+
+        
+def run_gates(args):
+    uh = solve_poisson_gates_var_eps(
+        Lx=1.0, Ly=1.0,
+        oxide_ymin=0.80,
+        gateA=(0.15, 0.75, 0.20, 0.20),
+        gateB=(0.55, 0.75, 0.30, 0.20),
+        eps_r_semic=args.eps_r_semic if hasattr(args, "eps_r_semic") else 11.7,
+        eps_r_oxide=args.eps_r if hasattr(args, "eps_r") else 3.9,  # reuse eps_r if you like
+        VgateA=args.phi_right if hasattr(args, "phi_right") else 0.20,
+        VgateB=args.phi_left  if hasattr(args, "phi_left")  else 0.00,
+        h=getattr(args, "h", 0.03),
+        outfile="phi_with_gates_var_eps.xdmf"
+    )
+    arr = _as_numpy(uh)
+    if arr is not None and arr.size:
+        print(f"[GATES] phi: min={arr.min():.3e} V, max={arr.max():.3e} V")
 
 if __name__ == "__main__":
     main()
