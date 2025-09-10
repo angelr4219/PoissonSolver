@@ -28,7 +28,7 @@ def mms_run(N_list: List[int], eps_r: float = 1.0, outprefix: str = "results/mms
     gdim = 2
 
     # u_exact = 1 + x^2 + 2 y^2  (classic tutorial) -> f = -ε * div grad u = -ε * (2 + 4) = -6 ε
-    # (Directly mirrors FEniCS tutorial test problem.) :contentReference[oaicite:4]{index=4}:contentReference[oaicite:5]{index=5}
+    
     rates = []
     h_vals = []
     E_L2 = []
@@ -47,8 +47,9 @@ def mms_run(N_list: List[int], eps_r: float = 1.0, outprefix: str = "results/mms
         def on_bdry(x):
             return np.isclose(x[0],0) | np.isclose(x[0],1) | np.isclose(x[1],0) | np.isclose(x[1],1)
         dofs = fem.locate_dofs_geometrical(V, on_bdry)
-        bc = fem.dirichletbc(fem.Function(V).interpolate(fem.Expression(u_exact, V.element.interpolation_points())), dofs)
-
+        uD = fem.Function(V); uD.interpolate(u_exact)   # if u_exact is a Python callable
+        bc = fem.dirichletbc(uD, dofs)
+        
         # Build eps_fun as constant DG0
         W = fem.functionspace(domain, ("Discontinuous Lagrange", 0))
         eps_fun = fem.Function(W); eps_fun.x.array[:] = eps

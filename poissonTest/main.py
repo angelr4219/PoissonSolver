@@ -5,13 +5,13 @@ import numpy as np
 from Extended-PS import solve_poisson_gates_var_eps
 
 # ---- Your modules ----
-from poisson_linear import poisson_linear  # FEniCSx linear solver (returns dolfinx Function)
+from poissonTest.poisson_linear import poisson_linear  # FEniCSx linear solver (returns dolfinx Function)
 
 # The following modules are your finite-difference versions you shared earlier.
 # They may expose functions with these names; we try them in order.
-from poisson_intro_solution import *   # expected: assemble_poisson_mms(Nx, Ny) -> (phi, err_l2, err_max)
-from poissonLinear2 import *           # expected: solve_poisson_linear(Nx, Ny, eps_r, rho_val, phi_left, phi_right) -> phi
-from DoS_2D import *                   # expected: solve_poisson_2d_dos(...) -> phi
+from poissonTest.poisson_intro_solution import *   # expected: assemble_poisson_mms(Nx, Ny) -> (phi, err_l2, err_max)
+from poissonTest.poissonLinear2 import *           # expected: solve_poisson_linear(Nx, Ny, eps_r, rho_val, phi_left, phi_right) -> phi
+from poissonTest.DoS_2D import *                   # expected: solve_poisson_2d_dos(...) -> phi
 
 def _as_numpy(result):
     """
