@@ -20,7 +20,7 @@ from dolfinx import mesh, fem
 from petsc4py import PETSc
 import matplotlib.pyplot as plt
 
-from src.physics.permittivity import EPS0
+from src.physics.Permittivity import EPS0
 from src.solver.poisson import solve_poisson
 
 def mms_run(N_list: List[int], eps_r: float = 1.0, outprefix: str = "results/mms"):
