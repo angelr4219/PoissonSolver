@@ -41,13 +41,13 @@ def build_2d(mode: str, Lx: float, Ly: float, lc: float, **kw):
     gmsh.initialize()
     gmsh.model.add(mode)
     s_out, outer_edges = _square(Lx, Ly, lc)
-    gmsh.model.geo.synchronize()
+    gmsh.model.occ.synchronize()
 
     inc = None
     if mode == "disk2d":
         cx, cy = kw.get("center", (Lx/2, Ly/2))
         R = kw.get("R", min(Lx,Ly)/4)
-        inc = gmsh.model.geo.addDisk(cx, cy, 0, R, R)
+        inc = gmsh.model.occ.addDisk(cx, cy, 0, R, R)
     elif mode == "rod2d":
         # vertical rod (rectangle)
         x0 = kw.get("x0", Lx*0.45)
@@ -61,10 +61,10 @@ def build_2d(mode: str, Lx: float, Ly: float, lc: float, **kw):
     else:
         raise ValueError("Unsupported 2D mode")
 
-    gmsh.model.geo.synchronize()
+    gmsh.model.occ.synchronize()
     if inc is not None:
-        cut = gmsh.model.geo.fragment([(2, s_out)], [(2, inc)])
-        gmsh.model.geo.synchronize()
+        cut = gmsh.model.occ.fragment([(2, s_out)], [(2, inc)])
+        gmsh.model.occ.synchronize()
 
     # Tag cells
     ent2d = [e for e in gmsh.model.getEntities(2)]
@@ -87,7 +87,7 @@ def build_2d(mode: str, Lx: float, Ly: float, lc: float, **kw):
         pg_incl = gmsh.model.addPhysicalGroup(2, inclusion); gmsh.model.setPhysicalName(2, pg_incl, "inclusion")
 
     # Facets
-    gmsh.model.geo.synchronize()
+    gmsh.model.occ.synchronize()
     b_all = gmsh.model.getBoundary([(2,t) for t in outer], oriented=False, recursive=True)
     outer_edges = list({c[1] for c in b_all})
     pg_outer_f = gmsh.model.addPhysicalGroup(1, outer_edges); gmsh.model.setPhysicalName(1, pg_outer_f, "outer")
