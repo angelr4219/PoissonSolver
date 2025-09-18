@@ -1,0 +1,231 @@
+from mpi4py import MPI
+import argparse, numpy as np, ufl, gmsh
+from dolfinx import mesh, fem
+from dolfinx.io import gmshio, XDMFFile
+from dolfinx.fem.petsc import LinearProblem
+from petsc4py import PETSc
+
+comm = MPI.COMM_WORLD
+
+def build_geometry(Lx, Ly, Lz, R, h,
+                   t_si_bot, t_sige, t_si_top):
+    """
+    Make a rectangular prism with a cylindrical through-bore along z.
+    Tag volumes so we can set eps_r by layer + air.
+    """
+    gmsh.initialize()
+    gmsh.model.add("rod_with_bore")
+
+    # Base box (solid) centered at (Lx/2, Ly/2, Lz/2)
+    box = gmsh.model.occ.addBox(0, 0, 0, Lx, Ly, Lz)
+
+    # Cylinder along z (air bore)
+    cyl = gmsh.model.occ.addCylinder(Lx/2, Ly/2, 0, 0, 0, Lz, R)
+
+    # Fragment box with cylinder so we keep both volumes separated
+    # (not a subtraction — we want two material subdomains)
+    ov, _ = gmsh.model.occ.fragment([(3, box)], [(3, cyl)])
+    gmsh.model.occ.synchronize()
+
+    # Identify the two volumes: one is air (the cylinder), one (or more) is solid
+    vols = gmsh.model.getEntities(dim=3)
+    # Heuristic: the smaller volume is the cylinder (air)
+    v_tags = [tag for (dim, tag) in vols]
+    v_measures = []
+    for tag in v_tags:
+        com, mass = gmsh.model.occ.getCenterOfMass(3, tag), gmsh.model.occ.getMass(3, tag)
+        v_measures.append((tag, mass))
+    v_measures.sort(key=lambda x: x[1])
+    air_vol = v_measures[0][0]
+    solid_vols = [tag for tag,_ in v_measures[1:]]
+
+    # Tag the air volume
+    gmsh.model.addPhysicalGroup(3, [air_vol], tag=101)  # air = 101
+    gmsh.model.setPhysicalName(3, 101, "air")
+
+    # Now split the solid into axial layers via implicit fields: we’ll mesh first,
+    # then tag cells by z-slab on the fly in FEniCSx. Alternatively, you could
+    # boolean-slice the solid in gmsh; keeping it simple here.
+
+    # Outer boundary (box faces) group
+    outer_surfs = gmsh.model.getEntities(dim=2)
+    gmsh.model.addPhysicalGroup(2, [s for (_, s) in outer_surfs], tag=301)
+    gmsh.model.setPhysicalName(2, 301, "outer")
+
+    # Mesh size
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
+
+    gmsh.model.mesh.generate(3)
+    gmsh.write("rod_with_bore.msh")
+    domain, ct, ft = gmshio.model_to_mesh(gmsh.model, comm, 0)
+    gmsh.finalize()
+    return domain, ct, ft
+
+def tag_layers(domain, ct, Lz, t_si_bot, t_sige, t_si_top, air_tag=101):
+    """
+    Convert the single 'air' physical volume tag into DG0 cell tags:
+    101: air (already tagged by gmsh)
+    201: Si bottom slab
+    202: SiGe middle slab
+    203: Si top slab
+    """
+    from dolfinx.cpp.mesh import entities_to_geometry
+    import numpy as np
+    # Start with all cells marked as 'solid default 0'
+    cell_tags = np.zeros(ct.values.shape, dtype=np.int32)
+
+    # Copy gmsh's air tag where present
+    cell_tags[ct.values == air_tag] = air_tag
+
+    # For the rest, tag by z-slab
+    x = domain.geometry.x
+    # Map: topology cell -> geometry nodes:
+    cells_as_nodes = entities_to_geometry(domain, domain.topology.dim, np.arange(domain.topology.index_map(domain.topology.dim).size_local, dtype=np.int32), False)
+    # Compute cell z-centers
+    cell_z = np.mean(x[cells_as_nodes, 2], axis=1)
+
+    z1 = t_si_bot
+    z2 = t_si_bot + t_sige
+    # solid cells are where cell_tags == 0
+    solid_idx = np.where(cell_tags == 0)[0]
+    cell_tags[solid_idx[(cell_z[solid_idx] >= 0.0) & (cell_z[solid_idx] <  z1)]] = 201  # Si bottom
+    cell_tags[solid_idx[(cell_z[solid_idx] >= z1 ) & (cell_z[solid_idx] <  z2)]] = 202  # SiGe mid
+    cell_tags[solid_idx[(cell_z[solid_idx] >= z2 ) & (cell_z[solid_idx] <= Lz )]] = 203  # Si top
+
+    # Build a new MeshTags for cells
+    from dolfinx.mesh import meshtags
+    ct_layers = meshtags(domain, domain.topology.dim, np.arange(len(cell_tags), dtype=np.int32), cell_tags)
+    return ct_layers
+
+def gaussian_charge(q, x0, sigma):
+    """
+    Return a UFL expression for a normalized 3D Gaussian:
+    rho(x) = q * (2*pi*sigma^2)^(-3/2) * exp(-||x-x0||^2 / (2 sigma^2))
+    """
+    x = ufl.SpatialCoordinate(ufl.as_domain(q.ufl_domain()))  # q is a Constant just for domain
+    dx = x - ufl.as_vector(x0)
+    r2 = ufl.inner(dx, dx)
+    two_pi = 2.0*np.pi
+    norm = q * (two_pi * sigma**2) ** (-1.5)
+    return norm * ufl.exp(-r2 / (2.0*sigma**2))
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--Lx", type=float, default=1.0)
+    p.add_argument("--Ly", type=float, default=1.0)
+    p.add_argument("--Lz", type=float, default=3.0)
+    p.add_argument("--R",  type=float, default=0.15)
+    p.add_argument("--h",  type=float, default=0.05)
+
+    p.add_argument("--t_si_bot", type=float, default=1.0)
+    p.add_argument("--t_sige",    type=float, default=1.0)
+    p.add_argument("--t_si_top",  type=float, default=1.0)
+
+    p.add_argument("--epsr_si",   type=float, default=11.7)
+    p.add_argument("--epsr_sige", type=float, default=13.0)
+    p.add_argument("--epsr_air",  type=float, default=1.0)
+
+    p.add_argument("--q", type=float, default=1e-12)   # Coulombs
+    p.add_argument("--x0", type=float, default=0.5)
+    p.add_argument("--y0", type=float, default=0.5)
+    p.add_argument("--z0", type=float, default=1.5)
+    p.add_argument("--sigma", type=float, default=0.05)
+
+    p.add_argument("--outfile", type=str, default="results/phi_rod_bore_3d")
+    args = p.parse_args()
+
+    assert abs(args.t_si_bot + args.t_sige + args.t_si_top - args.Lz) < 1e-12, "Layer thicknesses must sum to Lz."
+
+    domain, ct_raw, ft = build_geometry(args.Lx, args.Ly, args.Lz, args.R, args.h,
+                                        args.t_si_bot, args.t_sige, args.t_si_top)
+    ct = tag_layers(domain, ct_raw, args.Lz, args.t_si_bot, args.t_sige, args.t_si_top, air_tag=101)
+
+    V = fem.FunctionSpace(domain, ("CG", 1))
+    u = fem.Function(V)
+    v = ufl.TestFunction(V)
+
+    # Build eps_r(cell) from tags (DG0)
+    DG0 = fem.FunctionSpace(domain, ("DG", 0))
+    epsr = fem.Function(DG0)
+    epsr_vec = epsr.x.array
+
+    # Pull cell tags (local)
+    import numpy as np
+    cell_tags = ct.values
+
+    # Assign eps_r by tag
+    epsr_vec[cell_tags == 101] = args.epsr_air
+    epsr_vec[cell_tags == 201] = args.epsr_si
+    epsr_vec[cell_tags == 202] = args.epsr_sige
+    epsr_vec[cell_tags == 203] = args.epsr_si
+    epsr.x.array[:] = epsr_vec
+
+    eps0 = 8.854187817e-12  # F/m
+    eps = fem.Function(DG0)
+    eps.x.array[:] = eps0 * epsr.x.array
+
+    # Gaussian "point" charge
+    qC = fem.Constant(domain, PETSc.ScalarType(args.q))
+    rho_expr = gaussian_charge(qC, (args.x0, args.y0, args.z0), args.sigma)
+
+    # Weak form: ∫ eps ∇u·∇v dx = ∫ rho v dx
+    dx = ufl.Measure("dx", domain=domain, subdomain_data=ct)
+    a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * dx
+    L = rho_expr * v * dx
+
+    # Dirichlet 0V on outer boundary
+    # Pick all exterior facets
+    from dolfinx.mesh import locate_entities_boundary
+    dim = domain.topology.dim
+    tdim = dim
+    domain.topology.create_connectivity(dim-1, dim)
+    facets = locate_entities_boundary(domain, dim-1, lambda x: np.ones(x.shape[1], dtype=bool))
+    bdry_dofs = fem.locate_dofs_topological(V, dim-1, facets)
+    bc0 = fem.dirichletbc(PETSc.ScalarType(0.0), bdry_dofs, V)
+
+    problem = LinearProblem(a, L, bcs=[bc0],
+                            petsc_options={
+                                "ksp_type": "cg",
+                                "pc_type": "gamg",
+                                "ksp_rtol": 1e-10, "ksp_max_it": 2000,
+                            })
+    phi = problem.solve()
+
+    # Write outputs
+    outfile = args.outfile
+    domain.name = "mesh"
+    with XDMFFile(comm, outfile + ".xdmf", "w") as xdmf:
+        xdmf.write_mesh(domain)
+        # Save eps_r for visualization
+        epsr_to_cg = fem.Function(V)
+        epsr_to_cg.interpolate(lambda x: np.interp(np.zeros_like(x[0]), [0,1],[0,1]))  # dummy init
+        # simple projection by cell -> CG nodal averaging
+        # (quick-and-dirty: use UFL to project)
+    # Small helper projection: project DG0 -> CG1 (optional, skip if not needed)
+    W = fem.FunctionSpace(domain, ("CG", 1))
+    w = fem.Function(W, name="epsr")
+    p_v = ufl.TestFunction(W)
+    p_u = ufl.TrialFunction(W)
+    mass = ufl.inner(p_u, p_v) * dx
+    rhs  = ufl.inner(epsr, p_v) * dx
+    proj = LinearProblem(mass, rhs, petsc_options={"ksp_type":"cg","pc_type":"jacobi"})
+    w.interpolate(lambda x: np.zeros_like(x[0]))  # init
+    w = proj.solve()
+
+    Er = fem.Function(W, name="phi")
+    Er.x.array[:] = phi.x.array
+
+    with XDMFFile(comm, outfile + ".xdmf", "a") as xdmf:
+        xdmf.write_function(w)     # eps_r (smoothed)
+        xdmf.write_function(Er)    # potential
+
+    # Optional: compute E = -grad(phi) in ParaView from Calculator, or export here if you like.
+
+    if comm.rank == 0:
+        print("[done] Wrote", outfile + ".xdmf")
+        print("Tip: In ParaView, add 'Gradient' of phi -> multiply by -1 to visualize E.")
+        print("Sanity check: min(phi), max(phi) =", float(phi.x.array.min()), float(phi.x.array.max()))
+
+if __name__ == "__main__":
+    main()
+

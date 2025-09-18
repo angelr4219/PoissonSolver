@@ -37,5 +37,5 @@ def gmsh_model_to_mesh(
         elif dim == gdim - 1:
             tag2name_facet[tag] = name
 
-    domain, cell_tags, facet_tags = gmshio.model_to_mesh(model, comm, rank, gdim=gdim)
+    domain, cell_tags, facet_tags, *rest = gmshio.model_to_mesh(model, comm, rank, gdim=gdim)
     return domain, cell_tags, facet_tags, tag2name_cell, tag2name_facet

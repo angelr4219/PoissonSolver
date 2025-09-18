@@ -1,188 +1,219 @@
-#!/usr/bin/env python3
-"""
-make_shapes.py
-Generate canonical shapes with tagging for 2D (disk/rod sections) and 3D (sphere/cylinder/+1 extra: ellipse).
+def build_2d(mode: str, Lx: float, Ly: float, h: float, R: float = None):
+    """
+    Build a unit rectangle with a disk/rect inclusion using OCC.
+    Returns (domain, cell_tags, facet_tags).
+    """
+    import gmsh
+    from mpi4py import MPI
 
-2D modes:
-  --mode disk2d, rod2d, ellipse2d
+    gmsh.initialize() if not gmsh.isInitialized() else None
+    gmsh.model.add("rod2d")
 
-3D modes:
-  --mode sphere3d, cylinder3d, wedge3d
+    # ---- 1) Make surfaces in OCC and keep THEIR TAGS
+    rect_tag = gmsh.model.occ.addRectangle(0.0, 0.0, 0.0, Lx, Ly)
 
-For each: tags cells by "domain" (and "inclusion"), facets by "outer" and "inclusion_boundary".
-
-CLI examples:
-  python -m src.geometry.make_shapes --mode disk2d --R 0.2 --center 0.5 0.5 --Lx 1 --Ly 1 --h 0.03 --outfile disk2d
-  python -m src.geometry.make_shapes --mode sphere3d --R 0.25 --L 1 --h 0.08 --outfile sphere3d
-
-"""
-from __future__ import annotations
-import argparse, sys
-from typing import Tuple
-import gmsh
-from mpi4py import MPI
-from ._utils import gmsh_model_to_mesh
-
-def _square(Lx, Ly, lc):
-    p = []
-    p.append(gmsh.model.geo.addPoint(0, 0, 0, lc))
-    p.append(gmsh.model.geo.addPoint(Lx, 0, 0, lc))
-    p.append(gmsh.model.geo.addPoint(Lx, Ly, 0, lc))
-    p.append(gmsh.model.geo.addPoint(0, Ly, 0, lc))
-    l1 = gmsh.model.geo.addLine(p[0], p[1])
-    l2 = gmsh.model.geo.addLine(p[1], p[2])
-    l3 = gmsh.model.geo.addLine(p[2], p[3])
-    l4 = gmsh.model.geo.addLine(p[3], p[0])
-    loop = gmsh.model.geo.addCurveLoop([l1,l2,l3,l4])
-    s = gmsh.model.geo.addPlaneSurface([loop])
-    return s, [l1,l2,l3,l4]
-
-def build_2d(mode: str, Lx: float, Ly: float, lc: float, **kw):
-    gmsh.initialize()
-    gmsh.model.add(mode)
-    s_out, outer_edges = _square(Lx, Ly, lc)
-    gmsh.model.occ.synchronize()
-
-    inc = None
-    if mode == "disk2d":
-        cx, cy = kw.get("center", (Lx/2, Ly/2))
-        R = kw.get("R", min(Lx,Ly)/4)
-        inc = gmsh.model.occ.addDisk(cx, cy, 0, R, R)
-    elif mode == "rod2d":
-        # vertical rod (rectangle)
-        x0 = kw.get("x0", Lx*0.45)
-        w  = kw.get("w", 0.10)
-        inc, _ = _square(w, Ly*0.8, lc)  # create then translate
-        gmsh.model.geo.translate([(2,inc)], x0, Ly*0.1, 0)
-    elif mode == "ellipse2d":
-        cx, cy = kw.get("center", (Lx/2, Ly*0.7))
-        a, b   = kw.get("a", 0.25), kw.get("b", 0.12)
-        inc = gmsh.model.geo.addEllipse(cx, cy, 0, a, b)
+    if mode in ("rod2d", "disk2d"):
+        assert R is not None and R > 0.0
+        inc_tag = gmsh.model.occ.addDisk(Lx/2.0, Ly/2.0, 0.0, R, R)
+    elif mode == "rect_hole2d":
+        w = h if R is None else R
+        inc_tag = gmsh.model.occ.addRectangle(Lx/2.0 - w/2.0, Ly/2.0 - w/2.0, 0.0, w, w)
     else:
-        raise ValueError("Unsupported 2D mode")
+        raise ValueError(f"Unknown 2D mode: {mode}")
 
+    # ---- 2) Keep BOTH regions (outer + inclusion) as separate materials
+    gmsh.model.occ.fragment([(2, rect_tag)], [(2, inc_tag)])
     gmsh.model.occ.synchronize()
-    if inc is not None:
-        cut = gmsh.model.occ.fragment([(2, s_out)], [(2, inc)])
-        gmsh.model.occ.synchronize()
 
-    # Tag cells
-    ent2d = [e for e in gmsh.model.getEntities(2)]
-    outer = []
-    inclusion = []
-    for dim, tag in ent2d:
-        mass, c = gmsh.model.occ.getMass(dim, tag), gmsh.model.occ.getCenterOfMass(dim, tag)
-        # simple centroid test: if |c - center| small and area smaller than outer, label as inclusion
-        # Instead, tag all surfaces except one with "inclusion" by area
-    areas = [(tag, gmsh.model.occ.getMass(2, tag)) for _,tag in ent2d]
-    largest = max(areas, key=lambda t: t[1])[0]
-    for _,tag in ent2d:
-        if tag == largest:
-            outer.append(tag)
-        else:
-            inclusion.append(tag)
+    # ---- 3) Tag physical groups for cells (dim=2)
+    ents2 = gmsh.model.occ.getEntities(2)
+    areas = [(tag, gmsh.model.occ.getMass(2, tag)) for (_, tag) in ents2]
+    areas.sort(key=lambda t: t[1])
+    inc_surf = areas[0][0]
+    outer_surf = areas[-1][0]
 
-    pg_outer  = gmsh.model.addPhysicalGroup(2, outer);     gmsh.model.setPhysicalName(2, pg_outer,  "domain")
-    if inclusion:
-        pg_incl = gmsh.model.addPhysicalGroup(2, inclusion); gmsh.model.setPhysicalName(2, pg_incl, "inclusion")
+    gmsh.model.addPhysicalGroup(2, [outer_surf], 10)
+    gmsh.model.setPhysicalName(2, 10, "outer")
+    gmsh.model.addPhysicalGroup(2, [inc_surf], 20)
+    gmsh.model.setPhysicalName(2, 20, "inclusion")
 
-    # Facets
-    gmsh.model.occ.synchronize()
-    b_all = gmsh.model.getBoundary([(2,t) for t in outer], oriented=False, recursive=True)
-    outer_edges = list({c[1] for c in b_all})
-    pg_outer_f = gmsh.model.addPhysicalGroup(1, outer_edges); gmsh.model.setPhysicalName(1, pg_outer_f, "outer")
+    # Tag outer boundary curves
+    loops = gmsh.model.getBoundary([(2, outer_surf)], oriented=False, recursive=False)
+    outer_curves = [t for (dim, t) in loops if dim == 1]
+    if outer_curves:
+        gmsh.model.addPhysicalGroup(1, outer_curves, 101)
+        gmsh.model.setPhysicalName(1, 101, "outer_boundary")
 
-    if inclusion:
-        b_inc = gmsh.model.getBoundary([(2,t) for t in inclusion], oriented=False, recursive=True)
-        inc_edges = list({c[1] for c in b_inc})
-        pg_inc_f = gmsh.model.addPhysicalGroup(1, inc_edges); gmsh.model.setPhysicalName(1, pg_inc_f, "inclusion_boundary")
-
+    # ---- 4) Mesh size + generate
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
     gmsh.model.mesh.generate(2)
+
+    # ---- 5) Convert to dolfinx
     return gmsh.model
+def build_3d(mode: str, Lx: float, Ly: float, L: float, h: float, R: float = None):
+    """
+    3D prism with a through cylindrical inclusion (bore/air) using OCC.
+    Returns gmsh.model; conversion is handled elsewhere (helpers).
+    Tags:
+      volumes: "solid"(110), "bore"(120)
+      faces:   "outer_boundary"(201), "bore_boundary"(202)
+    """
+    import gmsh
+    assert mode in ("cylinder3d", "rod3d"), f"Unknown 3D mode: {mode}"
+    assert R is not None and R > 0.0
 
-def build_3d(mode: str, L: float, lc: float, **kw):
-    gmsh.initialize()
-    gmsh.model.add(mode)
-    # Outer box
-    box = gmsh.model.occ.addBox(0,0,0, L,L,L)
+    # Safe init if not already
+    gmsh.initialize() if not gmsh.isInitialized() else None
+    gmsh.model.add("rod3d")
+
+    # Geometry (OCC)
+    box = gmsh.model.occ.addBox(0.0, 0.0, 0.0, Lx, Ly, L)
+    cyl = gmsh.model.occ.addCylinder(Lx/2.0, Ly/2.0, 0.0, 0.0, 0.0, L, R)
+
+    # Keep both domains (solid + bore)
+    gmsh.model.occ.fragment([(3, box)], [(3, cyl)])
     gmsh.model.occ.synchronize()
 
-    inclusion = None
-    if mode == "sphere3d":
-        R = kw.get("R", L/4)
-        inclusion = gmsh.model.occ.addSphere(L/2, L/2, L/2, R)
-    elif mode == "cylinder3d":
-        R = kw.get("R", L/6)
-        H = kw.get("H", L*0.8)
-        inclusion = gmsh.model.occ.addCylinder(L/2, L/2, (L-H)/2, 0,0,H, R)
-    elif mode == "wedge3d":
-        # Simple wedge from a triangular prism
-        p1=gmsh.model.occ.addPoint(0,0,0); p2=gmsh.model.occ.addPoint(L,0,0); p3=gmsh.model.occ.addPoint(0,L,0)
-        t = gmsh.model.occ.addTriangle(p1,p2,p3)
-        inclusion = gmsh.model.occ.extrude([(2,t)], 0,0,L/2)[1][1]
-    else:
-        raise ValueError("Unsupported 3D mode")
+    # Volume tags by mass (smaller = bore)
+    vols = gmsh.model.occ.getEntities(3)
+    masses = [(tag, gmsh.model.occ.getMass(3, tag)) for (_, tag) in vols]
+    masses.sort(key=lambda t: t[1])
+    bore_vol  = masses[0][0]
+    solid_vol = masses[-1][0]
 
-    gmsh.model.occ.synchronize()
-    frag = gmsh.model.occ.fragment([(3, box)], [(3, inclusion)])
-    gmsh.model.occ.synchronize()
+    gmsh.model.addPhysicalGroup(3, [solid_vol], 110)
+    gmsh.model.setPhysicalName(3, 110, "solid")
+    gmsh.model.addPhysicalGroup(3, [bore_vol], 120)
+    gmsh.model.setPhysicalName(3, 120, "bore")
 
-    # Tag volumes
-    vols = [v[1] for v in gmsh.model.getEntities(3)]
-    volumes_by_vol = [(v, gmsh.model.occ.getMass(3, v)) for v in vols]
-    largest = max(volumes_by_vol, key=lambda t: t[1])[0]
-    outer = [largest]
-    inclusion_vols = [v for v in vols if v != largest]
+    # Face groups
+    solid_faces = gmsh.model.getBoundary([(3, solid_vol)], oriented=False, recursive=False)
+    bore_faces  = gmsh.model.getBoundary([(3, bore_vol)],   oriented=False, recursive=False)
+    bore_face_tags  = {t for (d, t) in bore_faces if d == 2}
+    solid_face_tags = [t for (d, t) in solid_faces if d == 2]
+    outer_faces = [t for t in solid_face_tags if t not in bore_face_tags]
 
-    pg_dom = gmsh.model.addPhysicalGroup(3, outer); gmsh.model.setPhysicalName(3, pg_dom, "domain")
-    if inclusion_vols:
-        pg_inc = gmsh.model.addPhysicalGroup(3, inclusion_vols); gmsh.model.setPhysicalName(3, pg_inc, "inclusion")
+    if outer_faces:
+        gmsh.model.addPhysicalGroup(2, outer_faces, 201)
+        gmsh.model.setPhysicalName(2, 201, "outer_boundary")
+    if bore_face_tags:
+        gmsh.model.addPhysicalGroup(2, list(bore_face_tags), 202)
+        gmsh.model.setPhysicalName(2, 202, "bore_boundary")
 
-    # Facets (surfaces)
-    gmsh.model.occ.synchronize()
-    s_dom = gmsh.model.getBoundary([(3, v) for v in outer], oriented=False, recursive=True)
-    s_dom_ids = list({s[1] for s in s_dom})
-    pg_outer = gmsh.model.addPhysicalGroup(2, s_dom_ids); gmsh.model.setPhysicalName(2, pg_outer, "outer")
-
-    if inclusion_vols:
-        s_inc = gmsh.model.getBoundary([(3,v) for v in inclusion_vols], oriented=False, recursive=True)
-        s_inc_ids = list({s[1] for s in s_inc})
-        pg_inc_f = gmsh.model.addPhysicalGroup(2, s_inc_ids); gmsh.model.setPhysicalName(2, pg_inc_f, "inclusion_boundary")
-
+    # Mesh
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
     gmsh.model.mesh.generate(3)
+
     return gmsh.model
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", type=str, required=True, choices=[
-        "disk2d","rod2d","ellipse2d","sphere3d","cylinder3d","wedge3d"
-    ])
-    ap.add_argument("--Lx", type=float, default=1.0)
-    ap.add_argument("--Ly", type=float, default=1.0)
-    ap.add_argument("--L", type=float, default=1.0)
-    ap.add_argument("--h", type=float, default=0.05)
-    ap.add_argument("--R", type=float, default=0.25)
-    ap.add_argument("--outfile", type=str, default="shape")
-    args = ap.parse_args()
+def build_3d(mode: str, Lx: float, Ly: float, L: float, h: float, R: float = None):
+    """
+    3D prism with a through cylindrical inclusion (bore/air) using OCC.
+    Returns gmsh.model; conversion is handled elsewhere (helpers).
+    Tags:
+      volumes: "solid"(110), "bore"(120)
+      faces:   "outer_boundary"(201), "bore_boundary"(202)
+    """
+    import gmsh
+    assert mode in ("cylinder3d", "rod3d"), f"Unknown 3D mode: {mode}"
+    assert R is not None and R > 0.0
 
-    if args.mode.endswith("2d"):
-        model = build_2d(args.mode, args.Lx, args.Ly, args.h, R=args.R)
-        domain_dim = 2
-    else:
-        model = build_3d(args.mode, args.L, args.h, R=args.R)
-        domain_dim = 3
+    # Safe init if not already
+    gmsh.initialize() if not gmsh.isInitialized() else None
+    gmsh.model.add("rod3d")
 
-    from dolfinx.io import XDMFFile
-    from ._utils import gmsh_model_to_mesh
-    domain, cell_tags, facet_tags, t2n_cell, t2n_facet = gmsh_model_to_mesh(MPI.COMM_WORLD, gdim=domain_dim)
-    gmsh.finalize()
+    # Geometry (OCC)
+    box = gmsh.model.occ.addBox(0.0, 0.0, 0.0, Lx, Ly, L)
+    cyl = gmsh.model.occ.addCylinder(Lx/2.0, Ly/2.0, 0.0, 0.0, 0.0, L, R)
 
-    with XDMFFile(MPI.COMM_WORLD, f"{args.outfile}.xdmf", "w") as xdmf:
-        xdmf.write_mesh(domain)
-        xdmf.write_information("cell_tags", str(t2n_cell))
-        xdmf.write_information("facet_tags", str(t2n_facet))
-        xdmf.write_meshtags(cell_tags)
-        xdmf.write_meshtags(facet_tags)
+    # Keep both domains (solid + bore)
+    gmsh.model.occ.fragment([(3, box)], [(3, cyl)])
+    gmsh.model.occ.synchronize()
 
-if __name__ == "__main__":
-    main()
+    # Volume tags by mass (smaller = bore)
+    vols = gmsh.model.occ.getEntities(3)
+    masses = [(tag, gmsh.model.occ.getMass(3, tag)) for (_, tag) in vols]
+    masses.sort(key=lambda t: t[1])
+    bore_vol  = masses[0][0]
+    solid_vol = masses[-1][0]
+
+    gmsh.model.addPhysicalGroup(3, [solid_vol], 110)
+    gmsh.model.setPhysicalName(3, 110, "solid")
+    gmsh.model.addPhysicalGroup(3, [bore_vol], 120)
+    gmsh.model.setPhysicalName(3, 120, "bore")
+
+    # Face groups
+    solid_faces = gmsh.model.getBoundary([(3, solid_vol)], oriented=False, recursive=False)
+    bore_faces  = gmsh.model.getBoundary([(3, bore_vol)],   oriented=False, recursive=False)
+    bore_face_tags  = {t for (d, t) in bore_faces if d == 2}
+    solid_face_tags = [t for (d, t) in solid_faces if d == 2]
+    outer_faces = [t for t in solid_face_tags if t not in bore_face_tags]
+
+    if outer_faces:
+        gmsh.model.addPhysicalGroup(2, outer_faces, 201)
+        gmsh.model.setPhysicalName(2, 201, "outer_boundary")
+    if bore_face_tags:
+        gmsh.model.addPhysicalGroup(2, list(bore_face_tags), 202)
+        gmsh.model.setPhysicalName(2, 202, "bore_boundary")
+
+    # Mesh
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
+    gmsh.model.mesh.generate(3)
+
+    return gmsh.model
+
+def build_3d(mode: str, Lx: float, Ly: float, L: float, h: float, R: float = None):
+    """
+    3D prism with a through cylindrical inclusion (bore/air) using OCC.
+    Returns gmsh.model; conversion is handled elsewhere (helpers).
+    Tags:
+      volumes: "solid"(110), "bore"(120)
+      faces:   "outer_boundary"(201), "bore_boundary"(202)
+    """
+    import gmsh
+    assert mode in ("cylinder3d", "rod3d"), f"Unknown 3D mode: {mode}"
+    assert R is not None and R > 0.0
+
+    # Safe init if not already
+    gmsh.initialize() if not gmsh.isInitialized() else None
+    gmsh.model.add("rod3d")
+
+    # Geometry (OCC)
+    box = gmsh.model.occ.addBox(0.0, 0.0, 0.0, Lx, Ly, L)
+    cyl = gmsh.model.occ.addCylinder(Lx/2.0, Ly/2.0, 0.0, 0.0, 0.0, L, R)
+
+    # Keep both domains (solid + bore)
+    gmsh.model.occ.fragment([(3, box)], [(3, cyl)])
+    gmsh.model.occ.synchronize()
+
+    # Volume tags by mass (smaller = bore)
+    vols = gmsh.model.occ.getEntities(3)
+    masses = [(tag, gmsh.model.occ.getMass(3, tag)) for (_, tag) in vols]
+    masses.sort(key=lambda t: t[1])
+    bore_vol  = masses[0][0]
+    solid_vol = masses[-1][0]
+
+    gmsh.model.addPhysicalGroup(3, [solid_vol], 110)
+    gmsh.model.setPhysicalName(3, 110, "solid")
+    gmsh.model.addPhysicalGroup(3, [bore_vol], 120)
+    gmsh.model.setPhysicalName(3, 120, "bore")
+
+    # Face groups
+    solid_faces = gmsh.model.getBoundary([(3, solid_vol)], oriented=False, recursive=False)
+    bore_faces  = gmsh.model.getBoundary([(3, bore_vol)],   oriented=False, recursive=False)
+    bore_face_tags  = {t for (d, t) in bore_faces if d == 2}
+    solid_face_tags = [t for (d, t) in solid_faces if d == 2]
+    outer_faces = [t for t in solid_face_tags if t not in bore_face_tags]
+
+    if outer_faces:
+        gmsh.model.addPhysicalGroup(2, outer_faces, 201)
+        gmsh.model.setPhysicalName(2, 201, "outer_boundary")
+    if bore_face_tags:
+        gmsh.model.addPhysicalGroup(2, list(bore_face_tags), 202)
+        gmsh.model.setPhysicalName(2, 202, "bore_boundary")
+
+    # Mesh
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
+    gmsh.model.mesh.generate(3)
+
+    return gmsh.model
