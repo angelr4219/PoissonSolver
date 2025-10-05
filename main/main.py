@@ -1,15 +1,15 @@
 # src/main.py
 import argparse, os
-import numpy as np
 import ufl
+import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 from dolfinx import fem
 from dolfinx.io import XDMFFile
 from dolfinx import mesh as dmesh
-from . import geometry as geo
-from . import permittivity as pm
-from . import poisson as ps
+from .geometry import geometry as geo
+from .physics import permittivity as pm
+from .solver import poisson as ps
 
 def build_parser():
     p = argparse.ArgumentParser(description="Poisson/Laplace driver")
@@ -46,7 +46,7 @@ def main():
             "y0": dmesh.locate_entities_boundary(domain, fdim, lambda X: np.isclose(X[1], 0.0)),
             "y1": dmesh.locate_entities_boundary(domain, fdim, lambda X: np.isclose(X[1], 1.0)),
         }
-        uD = fem.Function(V); uD.interpolate(fem.Expression(u_exact, V.element.interpolation_points()))
+        uD = fem.Function(V); uD.interpolate(fem.Expression(u_exact, V.element.interpolation_points))
         bcs = [fem.dirichletbc(uD, fem.locate_dofs_topological(V, fdim, facets[k])) for k in ("x0","x1","y0")]
 
         if args.case == "2d_dirichlet":
@@ -56,7 +56,6 @@ def main():
             n = ufl.as_vector((0.0, 1.0))
             g = ufl.dot((eps)*ufl.grad(u_exact), n)
             # make facet tags for ds
-            import numpy as np
             indices = np.concatenate([facets["x0"], facets["x1"], facets["y0"], facets["y1"]])
             values  = np.concatenate([np.full_like(facets["x0"], 1),
                                       np.full_like(facets["x1"], 2),
@@ -85,7 +84,7 @@ def main():
             "z0": dmesh.locate_entities_boundary(domain, fdim, lambda X: np.isclose(X[2], 0.0)),
             "z1": dmesh.locate_entities_boundary(domain, fdim, lambda X: np.isclose(X[2], 1.0)),
         }
-        uD = fem.Function(V); uD.interpolate(fem.Expression(u_exact, V.element.interpolation_points()))
+        uD = fem.Function(V); uD.interpolate(fem.Expression(u_exact, V.element.interpolation_points))
         if args.case == "3d_dirichlet":
             # Dirichlet on all faces → pure Dirichlet verification
             bcs = [fem.dirichletbc(uD, fem.locate_dofs_topological(V, fdim, facets[k]))
@@ -97,7 +96,6 @@ def main():
                    for k in ("x0","x1","y0","y1","z0")]
             n = ufl.as_vector((0.0,0.0,1.0))
             g = ufl.dot((eps)*ufl.grad(u_exact), n)
-            import numpy as np
             indices = np.concatenate([facets["x0"], facets["x1"], facets["y0"], facets["y1"], facets["z0"], facets["z1"]])
             values  = np.concatenate([np.full_like(facets["x0"], 1),
                                       np.full_like(facets["x1"], 2),
