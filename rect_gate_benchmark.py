@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-import os, numpy as np
+import os
+import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 from dolfinx import mesh, fem, io
+from dolfinx.fem import petsc as fempetsc
 from dolfinx.fem.petsc import LinearProblem
 import ufl
 
+# ---------- Analytic (sign fixed: positive under +V gates) ----------
 def g_uvz(u, v, z):
     return (1.0/(2.0*np.pi)) * np.arctan2(u*v, z*np.sqrt(u*u + v*v + z*z))
 
 def phi0_rect(x, y, z, a, xs, Vs):
+    z = z if z != 0.0 else np.finfo(float).eps
     s = 0.0
     for xi, Vi in zip(xs, Vs):
         s += Vi * (
@@ -18,8 +22,9 @@ def phi0_rect(x, y, z, a, xs, Vs):
             g_uvz(a + xi - x, a + y, z) +
             g_uvz(a + xi - x, a - y, z)
         )
-    return -s
+    return s
 
+# ---------- Mesh ----------
 def build_box(Lx, Ly, H, h):
     nx = max(2, int(np.ceil(Lx / h)))
     ny = max(2, int(np.ceil(Ly / h)))
@@ -29,106 +34,156 @@ def build_box(Lx, Ly, H, h):
     return mesh.create_box(MPI.COMM_WORLD, [p0, p1], (nx, ny, nz),
                            cell_type=mesh.CellType.tetrahedron)
 
-# ---- clamp top (z=min) with gates & ground bottom (z=max) ----
-def gate_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
-    domain = V.mesh; topo = domain.topology; tdim = topo.dim; fdim = tdim-1
-    topo.create_connectivity(fdim, tdim); topo.create_connectivity(fdim, 0)
-    z = domain.geometry.x[:,2]
-    zmin = domain.comm.allreduce(float(np.min(z)), op=MPI.MIN)
-    zmax = domain.comm.allreduce(float(np.max(z)), op=MPI.MAX)
-    # top
-    top_facets = mesh.locate_entities_boundary(domain, fdim,
-                  lambda x: np.isclose(x[2], zmin, atol=ztol))
+# ---------- BCs: scalar Dirichlet on explicit DOF sets (top gates + top rest + bottom) ----------
+def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
+    domain = V.mesh
+    topo = domain.topology
+    tdim = topo.dim
+    fdim = tdim - 1
+    topo.create_connectivity(fdim, tdim)
+    topo.create_connectivity(fdim, 0)
+
+    Z = domain.geometry.x[:, 2]
+    z_min = domain.comm.allreduce(float(np.min(Z)), op=MPI.MIN)
+    z_max = domain.comm.allreduce(float(np.max(Z)), op=MPI.MAX)
+
+    # Top facets/DOFs
+    top_facets = mesh.locate_entities_boundary(
+        domain, fdim, lambda x: np.isclose(x[2], z_min, atol=ztol)
+    )
     dofs_top = np.unique(fem.locate_dofs_topological(V, fdim, top_facets))
-    X = V.tabulate_dof_coordinates().reshape((-1,3)); Xtop = X[dofs_top]
-    vals_top = np.zeros(dofs_top.shape[0], dtype=PETSc.ScalarType)
+    X = V.tabulate_dof_coordinates().reshape((-1, 3))
+    Xtop = X[dofs_top]
+
+    used = np.zeros(dofs_top.shape[0], dtype=bool)
+    bcs = []
+
+    # Gates
     for xi, Vi in zip(xs, Vs):
-        in_rect = ((Xtop[:,0] >= (xi-a)-rect_tol) & (Xtop[:,0] <= (xi+a)+rect_tol) &
-                   (Xtop[:,1] >= -a-rect_tol) & (Xtop[:,1] <=  a+rect_tol))
-        vals_top[in_rect] = PETSc.ScalarType(Vi)
-    bc_top_fun = fem.Function(V); bc_top_fun.x.array[:] = 0.0
-    bc_top_fun.x.array[dofs_top] = vals_top
-    bc_top = fem.dirichletbc(bc_top_fun, dofs_top)
-    # bottom
-    bot_facets = mesh.locate_entities_boundary(domain, fdim,
-                  lambda x: np.isclose(x[2], zmax, atol=ztol))
+        in_rect = (
+            (Xtop[:, 0] >= (xi - a) - rect_tol) & (Xtop[:, 0] <= (xi + a) + rect_tol) &
+            (Xtop[:, 1] >= -a - rect_tol)      & (Xtop[:, 1] <=  a + rect_tol)
+        )
+        idx = np.where(in_rect)[0]
+        if idx.size:
+            dofs_i = dofs_top[idx]
+            bcs.append(fem.dirichletbc(PETSc.ScalarType(Vi), dofs_i, V))
+            used[idx] = True
+
+    # Top remainder = 0 V
+    idx0 = np.where(~used)[0]
+    if idx0.size:
+        bcs.append(fem.dirichletbc(PETSc.ScalarType(0.0), dofs_top[idx0], V))
+
+    # Bottom = 0 V
+    bot_facets = mesh.locate_entities_boundary(
+        domain, fdim, lambda x: np.isclose(x[2], z_max, atol=ztol)
+    )
     dofs_bot = np.unique(fem.locate_dofs_topological(V, fdim, bot_facets))
-    bc_bot = fem.dirichletbc(PETSc.ScalarType(0.0), dofs_bot, V)
-    if domain.comm.rank==0:
-        print(f"[DEBUG] top DOFs (unique): {dofs_top.shape[0]}, gate-DOFs: {int(np.count_nonzero(vals_top))}")
-        print(f"[DEBUG] bottom DOFs (unique): {dofs_bot.shape[0]}")
-    return [bc_top, bc_bot]
+    if dofs_bot.size:
+        bcs.append(fem.dirichletbc(PETSc.ScalarType(0.0), dofs_bot, V))
 
-def solve_laplace(domain, bcs, eps_r=11.7, eps0=8.8541878128e-12):
-    V = fem.functionspace(domain, ("Lagrange", 1))
-    u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
-    a = (eps_r*eps0) * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    if domain.comm.rank == 0:
+        n_top = dofs_top.shape[0]
+        n_gate = int(np.sum(used))
+        n_bot = dofs_bot.shape[0]
+        print(f"[DEBUG] TOP DOFs total={n_top}, gate-DOFs={n_gate}, top-0V DOFs={n_top-n_gate}")
+        print(f"[DEBUG] BOTTOM DOFs total={n_bot}")
+    return bcs
+
+# ---------- Solve (IMPORTANT: use the SAME V the BCs were built on) ----------
+def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
+    domain = V.mesh
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    lam = PETSc.ScalarType(eps_r * eps0)
+    a = lam * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = fem.Constant(domain, PETSc.ScalarType(0.0)) * v * ufl.dx
-    uh = LinearProblem(a, L, bcs=bcs).solve(); uh.name = "phi"; return V, uh
 
-def sample_dof_line(uh: fem.Function, zbar: float, h: float, ytol: float=1e-12):
+    petsc_opts = {
+        "ksp_type": "cg",
+        "pc_type": "hypre",
+        "ksp_rtol": 1e-10,
+        "ksp_error_if_not_converged": True
+    }
+    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_opts)
+    uh = problem.solve()
+    uh.name = "phi"
+
+    uarr = uh.x.array
+    n_bad = int(np.sum(~np.isfinite(uarr)))
+    gmin = float(np.nanmin(uarr)) if uarr.size else np.nan
+    gmax = float(np.nanmax(uarr)) if uarr.size else np.nan
+    if domain.comm.rank == 0:
+        print(f"[VOLTAGE] nonfinite={n_bad}, min={gmin:.6e}, max={gmax:.6e}")
+    return uh
+
+# ---------- Sampling ----------
+def sample_dof_line(uh: fem.Function, zbar: float, h: float, ytol: float = 1e-12):
     V = uh.function_space
-    X = V.tabulate_dof_coordinates().reshape((-1,3)); U = uh.x.array
+    X = V.tabulate_dof_coordinates().reshape((-1, 3))
+    U = uh.x.array
     ztol = max(1e-12, 0.5*h)
-    mask = (np.abs(X[:,1])<=ytol) & (np.abs(X[:,2]-zbar)<=ztol)
+    mask = (np.abs(X[:,1]) <= ytol) & (np.abs(X[:,2] - zbar) <= ztol)
     if not np.any(mask):
         ztol = max(ztol, h)
-        mask = (np.abs(X[:,1])<=5e-12) & (np.abs(X[:,2]-zbar)<=ztol)
-    xs, us = X[mask,0], U[mask]
-    if xs.size==0: raise RuntimeError("No dofs on probe line.")
-    order = np.argsort(xs); return xs[order], us[order]
+        mask = (np.abs(X[:,1]) <= 5e-12) & (np.abs(X[:,2] - zbar) <= ztol)
+    xs = X[mask, 0]; us = U[mask]
+    if xs.size == 0:
+        raise RuntimeError("No dofs found on probe line; try slightly adjusting zbar or mesh size.")
+    order = np.argsort(xs)
+    return xs[order], us[order]
 
+# ---------- One run ----------
 def run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix):
     domain = build_box(Lx, Ly, H, h)
     V = fem.functionspace(domain, ("Lagrange", 1))
-    bcs = gate_and_bottom_bcs(V, a, xs_gates, Vs_gates)
+    bcs = gate_top_and_bottom_bcs(V, a, xs_gates, Vs_gates, rect_tol=1e-8, ztol=1e-9)
 
-    V, uh = solve_laplace(domain, bcs)
-
-    # --- print basic voltage stats over the whole field
-    uarr = uh.x.array
-    n_bad = int(np.sum(~np.isfinite(uarr)))
-    if MPI.COMM_WORLD.rank==0:
-        print(f"[VOLTAGE] nonfinite={n_bad}, min={np.nanmin(uarr):.4e}, max={np.nanmax(uarr):.4e}")
+    uh = solve_laplace(V, bcs)  # <-- pass the SAME V
 
     os.makedirs(os.path.dirname(outprefix), exist_ok=True)
     with io.XDMFFile(domain.comm, f"{outprefix}.xdmf", "w") as xdmf:
         xdmf.write_mesh(domain); xdmf.write_function(uh)
 
-    # --- compare along line y=0, z=zbar and print a few samples
     xnodes, uh_nodes = sample_dof_line(uh, zbar, h)
     phi0_nodes = np.array([phi0_rect(x, 0.0, zbar, a, xs_gates, Vs_gates) for x in xnodes])
 
-    # print a few example voltages (near center and near ±2a)
-    if MPI.COMM_WORLD.rank==0:
-        def nearest(x0):
-            i = int(np.argmin(np.abs(xnodes-x0))); return xnodes[i], uh_nodes[i], phi0_nodes[i]
-        for x0 in [0.0, -2*a, 2*a]:
-            xsmp, ufe, uana = nearest(x0)
-            print(f"[SAMPLE] x≈{x0:.2e} -> FE={ufe:.4e} V, analytic={uana:.4e} V, Δ={ufe-uana:.2e} V")
+    dx = np.median(np.diff(np.sort(xnodes))) if xnodes.size>1 else a*0.01
+    band = 2.0*abs(dx)
+    edges = np.concatenate([xs_gates - a, xs_gates + a])
+    mask = (np.abs(xnodes) <= 2*a)
+    for e in edges:
+        mask &= (np.abs(xnodes - e) > band)
 
-    # restrict error to |x|<=2a
-    mask = np.abs(xnodes) <= 2*a
-    if not np.any(mask):
-        if MPI.COMM_WORLD.rank==0:
-            print("[WARN] no nodes in |x|<=2a; relaxing to |x|<=3a")
-        mask = np.abs(xnodes)<=3*a
     diffs = np.abs(uh_nodes[mask] - phi0_nodes[mask])
-    err_max = float(np.max(diffs)) if diffs.size else float('nan')
-    err_l2  = float(np.sqrt(np.mean(diffs**2))) if diffs.size else float('nan')
+    if diffs.size:
+        err_max = float(np.max(diffs))
+        err_l2  = float(np.sqrt(np.mean(diffs**2)))
+    else:
+        err_max = float("nan"); err_l2 = float("nan")
 
-    if MPI.COMM_WORLD.rank==0:
+    if MPI.COMM_WORLD.rank == 0:
         import csv
         with open(f"{outprefix}_line.csv","w",newline="") as f:
             w=csv.writer(f); w.writerow(["x_m","phi_FE_V","phi0_V"])
-            for x,u,a0 in zip(xnodes, uh_nodes, phi0_nodes): w.writerow([x,u,a0])
-        print(f"[{outprefix}] max|Δφ| (|x|≤2a) = {err_max:.4e} V,  L2 = {err_l2:.4e} V")
+            for x,u,a0 in zip(xnodes, uh_nodes, phi0_nodes):
+                w.writerow([x,u,a0])
+        print(f"[{outprefix}] max|Δφ| (|x|≤2a, edge-safe) = {err_max:.4e} V,  L2 = {err_l2:.4e} V")
     return err_max, err_l2
 
+# ---------- Main ----------
 if __name__ == "__main__":
-    a_nm=35.0; a=a_nm*1e-9; zbar=a
-    xs_gates=np.array([-2*a,0.0,2*a]); Vs_gates=np.array([0.25,0.10,0.25])
-    H=200e-9; h=5e-9
-    for p in [2.0,3.0,4.0,5.0]:
-        Lx=Ly=2*p*a; tag=f"p{int(p)}a"
-        run_once(Lx,Ly,H,h,a,xs_gates,Vs_gates,zbar,outprefix=f"results/phi_{tag}")
+    a_nm = 35.0
+    a = a_nm * 1e-9
+    zbar = a
+    xs_gates = np.array([-2*a, 0.0,  2*a])
+    Vs_gates = np.array([ 0.25, 0.10, 0.25])
+
+    H = 200e-9
+    h = 5e-9
+
+    for p in [2.0, 3.0, 4.0, 5.0]:
+        Lx = Ly = 2*p*a
+        tag = f"p{int(p)}a"
+        run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix=f"results/phi_{tag}")

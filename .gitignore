@@ -1,8 +1,24 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.so
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Results / large files
+results/
+results/**/*
 *.h5
 *.xdmf
-results/
+*.png
+*.csv
+
+# Docker
+*.log
