@@ -4,11 +4,10 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 from dolfinx import mesh, fem, io
-from dolfinx.fem import petsc as fempetsc
 from dolfinx.fem.petsc import LinearProblem
 import ufl
 
-# ---------- Analytic (sign fixed: positive under +V gates) ----------
+# ---------- Analytic for line probe ----------
 def g_uvz(u, v, z):
     return (1.0/(2.0*np.pi)) * np.arctan2(u*v, z*np.sqrt(u*u + v*v + z*z))
 
@@ -34,7 +33,7 @@ def build_box(Lx, Ly, H, h):
     return mesh.create_box(MPI.COMM_WORLD, [p0, p1], (nx, ny, nz),
                            cell_type=mesh.CellType.tetrahedron)
 
-# ---------- BCs: scalar Dirichlet on explicit DOF sets (top gates + top rest + bottom) ----------
+# ---------- BCs: top gates (Dirichlet), top-rest 0V, bottom 0V ----------
 def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
     domain = V.mesh
     topo = domain.topology
@@ -47,7 +46,7 @@ def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
     z_min = domain.comm.allreduce(float(np.min(Z)), op=MPI.MIN)
     z_max = domain.comm.allreduce(float(np.max(Z)), op=MPI.MAX)
 
-    # Top facets/DOFs
+    # top facets at z_min
     top_facets = mesh.locate_entities_boundary(
         domain, fdim, lambda x: np.isclose(x[2], z_min, atol=ztol)
     )
@@ -58,7 +57,7 @@ def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
     used = np.zeros(dofs_top.shape[0], dtype=bool)
     bcs = []
 
-    # Gates
+    # gate patches
     for xi, Vi in zip(xs, Vs):
         in_rect = (
             (Xtop[:, 0] >= (xi - a) - rect_tol) & (Xtop[:, 0] <= (xi + a) + rect_tol) &
@@ -70,12 +69,12 @@ def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
             bcs.append(fem.dirichletbc(PETSc.ScalarType(Vi), dofs_i, V))
             used[idx] = True
 
-    # Top remainder = 0 V
+    # top remainder 0V
     idx0 = np.where(~used)[0]
     if idx0.size:
         bcs.append(fem.dirichletbc(PETSc.ScalarType(0.0), dofs_top[idx0], V))
 
-    # Bottom = 0 V
+    # bottom 0V (z_max)
     bot_facets = mesh.locate_entities_boundary(
         domain, fdim, lambda x: np.isclose(x[2], z_max, atol=ztol)
     )
@@ -91,7 +90,7 @@ def gate_top_and_bottom_bcs(V, a, xs, Vs, rect_tol=1e-8, ztol=1e-9):
         print(f"[DEBUG] BOTTOM DOFs total={n_bot}")
     return bcs
 
-# ---------- Solve (IMPORTANT: use the SAME V the BCs were built on) ----------
+# ---------- Solve ----------
 def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
     domain = V.mesh
     u = ufl.TrialFunction(V)
@@ -110,6 +109,7 @@ def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
     uh = problem.solve()
     uh.name = "phi"
 
+    # sanity report
     uarr = uh.x.array
     n_bad = int(np.sum(~np.isfinite(uarr)))
     gmin = float(np.nanmin(uarr)) if uarr.size else np.nan
@@ -118,7 +118,7 @@ def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
         print(f"[VOLTAGE] nonfinite={n_bad}, min={gmin:.6e}, max={gmax:.6e}")
     return uh
 
-# ---------- Sampling ----------
+# ---------- Sampling along y=0 at z=zbar ----------
 def sample_dof_line(uh: fem.Function, zbar: float, h: float, ytol: float = 1e-12):
     V = uh.function_space
     X = V.tabulate_dof_coordinates().reshape((-1, 3))
@@ -140,29 +140,95 @@ def run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix):
     V = fem.functionspace(domain, ("Lagrange", 1))
     bcs = gate_top_and_bottom_bcs(V, a, xs_gates, Vs_gates, rect_tol=1e-8, ztol=1e-9)
 
-    uh = solve_laplace(V, bcs)  # <-- pass the SAME V
+    uh = solve_laplace(V, bcs)
 
+    # === Error analysis (global + cellwise fields) ===
+    from errors import report_errors
+    from exact_rect_gates import phi0_rect_three_gates_factory
+    os.makedirs("results", exist_ok=True)
+    exact_fun = phi0_rect_three_gates_factory(a, zbar, xs_gates, Vs_gates)
+    metrics = report_errors(domain, uh, exact_fun, out_prefix=f"{outprefix}_err", qdeg=4)
+    # --- Relative error: (exact - solution) / exact ---
+    # Pointwise field for ParaView and global relative metrics for CSV
+    # Build exact field in same space
+    uE = fem.Function(V, name="u_exact_point_rel"); uE.interpolate(exact_fun)
+    e = uE - uh
+    
+    # pointwise relative error at interpolation points: rel_e = |e| / max(|uE|, rel_tol)
+    from dolfinx import fem as _fem
+    import ufl as _ufl
+    import numpy as _np
+    from mpi4py import MPI as _MPI
+    
+    rel_tol_local = 1e-12
+    max_uE_local = float(_np.max(_np.abs(uE.x.array))) if uE.x.array.size else 0.0
+    max_uE = domain.comm.allreduce(max_uE_local, op=_MPI.MAX)
+    rel_tol = max(rel_tol_local, 1e-9*max_uE)  # floor to avoid divide-by-zero where exact≈0
+    rel_tol_const = fem.Constant(domain, PETSc.ScalarType(rel_tol))
+    expr_rel = _fem.Expression(_ufl.sqrt(e*e) / _ufl.max_value(_ufl.sqrt(uE*uE), rel_tol_const), V.element.interpolation_points())
+    rel_e = fem.Function(V, name="rel_e")
+    rel_e.interpolate(expr_rel)
+    with io.XDMFFile(domain.comm, f"{outprefix}_rel_point.xdmf", "w") as xf:
+        xf.write_mesh(domain); xf.write_function(rel_e)
+    
+    # global relative-L2 and relative Linf(dof)
+    # L2_rel = ||e||_L2 / ||uE||_L2
+    L2_e_sq  = fem.assemble_scalar(fem.form(_ufl.inner(e, e) * _ufl.dx(domain)))
+    L2_uE_sq = fem.assemble_scalar(fem.form(_ufl.inner(uE, uE) * _ufl.dx(domain)))
+    L2_e_sq  = domain.comm.allreduce(L2_e_sq,  op=_MPI.SUM)
+    L2_uE_sq = domain.comm.allreduce(L2_uE_sq, op=_MPI.SUM)
+    L2_rel = float((_np.sqrt(L2_e_sq) / _np.sqrt(L2_uE_sq)) if L2_uE_sq > 0 else _np.nan)
+    
+    # Linf_rel_dof = max_i |e_i| / max(|uE_i|, rel_tol)
+    uh_arr = uh.x.array; uE_arr = uE.x.array
+    den = _np.maximum(_np.abs(uE_arr), rel_tol)
+    Linf_rel_local = float(_np.max(_np.abs(uE_arr - uh_arr) / den)) if uh_arr.size else 0.0
+    Linf_rel_dof = domain.comm.allreduce(Linf_rel_local, op=_MPI.MAX)
+    
+    if domain.comm.rank == 0:
+        print(f"[REL]  L2_rel = {L2_rel:.6e}   Linf_rel(dof) = {Linf_rel_dof:.6e}   (rel_tol={rel_tol:.2e})")
+        import csv, os as _os
+        _os.makedirs("results", exist_ok=True)
+        with open("results/error_summary_rel.csv", "a", newline="") as f:
+            csv.writer(f).writerow([outprefix, L2_rel, Linf_rel_dof, rel_tol])
+
+    if domain.comm.rank == 0:
+        print(f"[GLOBAL] ||e||_L2      = {metrics['L2']:.6e}")
+        print(f"[GLOBAL] |e|_H1        = {metrics['H1_seminorm']:.6e}")
+        print(f"[GLOBAL] ||e||_Linf(d) = {metrics['Linf_dof']:.6e}")
+        print("[HOTSPOT] local cell id =", metrics["max_cell"]["local_id"])
+        print("[HOTSPOT] centroid xyz  =", metrics["max_cell"]["centroid"])
+        print("[HOTSPOT] L2(cell)      =", metrics["max_cell"]["L2_cell_norm"])
+        # CSV log for Leah
+        import csv
+        cent = metrics["max_cell"]["centroid"]
+        cx, cy, cz = (cent.tolist() if cent is not None else [None, None, None])
+        with open("results/error_summary.csv", "a", newline="") as f:
+            csv.writer(f).writerow([
+                outprefix, metrics["L2"], metrics["H1_seminorm"], metrics["Linf_dof"],
+                cx, cy, cz, metrics["max_cell"]["L2_cell_norm"],
+            ])
+
+    # write solution once per run
     os.makedirs(os.path.dirname(outprefix), exist_ok=True)
     with io.XDMFFile(domain.comm, f"{outprefix}.xdmf", "w") as xdmf:
         xdmf.write_mesh(domain); xdmf.write_function(uh)
 
+    # probe comparison on line (|x|<=2a, avoid edges)
     xnodes, uh_nodes = sample_dof_line(uh, zbar, h)
     phi0_nodes = np.array([phi0_rect(x, 0.0, zbar, a, xs_gates, Vs_gates) for x in xnodes])
-
     dx = np.median(np.diff(np.sort(xnodes))) if xnodes.size>1 else a*0.01
     band = 2.0*abs(dx)
     edges = np.concatenate([xs_gates - a, xs_gates + a])
     mask = (np.abs(xnodes) <= 2*a)
     for e in edges:
         mask &= (np.abs(xnodes - e) > band)
-
     diffs = np.abs(uh_nodes[mask] - phi0_nodes[mask])
     if diffs.size:
         err_max = float(np.max(diffs))
         err_l2  = float(np.sqrt(np.mean(diffs**2)))
     else:
         err_max = float("nan"); err_l2 = float("nan")
-
     if MPI.COMM_WORLD.rank == 0:
         import csv
         with open(f"{outprefix}_line.csv","w",newline="") as f:
