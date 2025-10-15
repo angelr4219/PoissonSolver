@@ -65,7 +65,7 @@ def solve_mixed(
 def norms(domain, V, uh: fem.Function, u_exact_ufl) -> Tuple[float, float]:
     """Return (L2 error, H1 seminorm error) against a UFL exact solution."""
     ue = fem.Function(V)
-    ue_expr = fem.Expression(u_exact_ufl, V.element.interpolation_points())
+    ue_expr = fem.Expression(u_exact_ufl, V.element.interpolation_points)
     ue.interpolate(ue_expr)
     e = uh - ue
     L2  = np.sqrt(fem.assemble_scalar(fem.form(e**2 * dx(domain))))
