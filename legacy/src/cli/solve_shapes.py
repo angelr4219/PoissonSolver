@@ -68,6 +68,19 @@ def _finalize_to_dolfinx(comm: MPI.Comm, gdim: int = 2):
     domain = out[0]
     cell_tags = out[1]
     facet_tags = out[2]
+# --- Enforce Dirichlet BCs (outer=0V on tag=1, hole=Vinc on tag=2) ---
+V = fem.functionspace(domain, ("Lagrange", 1))
+uD_out  = fem.Constant(domain, PETSc.ScalarType(0.0))
+uD_hole = fem.Constant(domain, PETSc.ScalarType(args.Vinc))
+tdim = domain.topology.dim
+outer_facets = facet_tags.find(1)
+hole_facets  = facet_tags.find(2)
+dofs_out  = fem.locate_dofs_topological(V, tdim-1, outer_facets)
+dofs_hole = fem.locate_dofs_topological(V, tdim-1, hole_facets)
+bc_out  = fem.dirichletbc(uD_out,  dofs_out,  V)
+bc_hole = fem.dirichletbc(uD_hole, dofs_hole, V)
+bcs = [bc_out, bc_hole]
+print("[BC] Dirichlet set: outer→0V, hole→Vinc; dofs:", len(dofs_out), len(dofs_hole))
     return domain, cell_tags, facet_tags
 
 
@@ -173,8 +186,34 @@ def main():
     # --- Build geometry ---
     if args.mode == "disk2d":
         domain, cell_tags, facet_tags = build_disk2d(comm, args.Lx, args.Ly, args.R, args.h)
+# --- Enforce Dirichlet BCs (outer=0V on tag=1, hole=Vinc on tag=2) ---
+V = fem.functionspace(domain, ("Lagrange", 1))
+uD_out  = fem.Constant(domain, PETSc.ScalarType(0.0))
+uD_hole = fem.Constant(domain, PETSc.ScalarType(args.Vinc))
+tdim = domain.topology.dim
+outer_facets = facet_tags.find(1)
+hole_facets  = facet_tags.find(2)
+dofs_out  = fem.locate_dofs_topological(V, tdim-1, outer_facets)
+dofs_hole = fem.locate_dofs_topological(V, tdim-1, hole_facets)
+bc_out  = fem.dirichletbc(uD_out,  dofs_out,  V)
+bc_hole = fem.dirichletbc(uD_hole, dofs_hole, V)
+bcs = [bc_out, bc_hole]
+print("[BC] Dirichlet set: outer→0V, hole→Vinc; dofs:", len(dofs_out), len(dofs_hole))
     else:
         domain, cell_tags, facet_tags = build_rod2d(comm, args.Lx, args.Ly, args.R, args.h)
+# --- Enforce Dirichlet BCs (outer=0V on tag=1, hole=Vinc on tag=2) ---
+V = fem.functionspace(domain, ("Lagrange", 1))
+uD_out  = fem.Constant(domain, PETSc.ScalarType(0.0))
+uD_hole = fem.Constant(domain, PETSc.ScalarType(args.Vinc))
+tdim = domain.topology.dim
+outer_facets = facet_tags.find(1)
+hole_facets  = facet_tags.find(2)
+dofs_out  = fem.locate_dofs_topological(V, tdim-1, outer_facets)
+dofs_hole = fem.locate_dofs_topological(V, tdim-1, hole_facets)
+bc_out  = fem.dirichletbc(uD_out,  dofs_out,  V)
+bc_hole = fem.dirichletbc(uD_hole, dofs_hole, V)
+bcs = [bc_out, bc_hole]
+print("[BC] Dirichlet set: outer→0V, hole→Vinc; dofs:", len(dofs_out), len(dofs_hole))
 
     # Quick debug of tags (rank 0)
     if comm.rank == 0:
@@ -212,6 +251,19 @@ def main():
             domain=domain,
             cell_tags=cell_tags,
             facet_tags=facet_tags,
+# --- Enforce Dirichlet BCs (outer=0V on tag=1, hole=Vinc on tag=2) ---
+V = fem.functionspace(domain, ("Lagrange", 1))
+uD_out  = fem.Constant(domain, PETSc.ScalarType(0.0))
+uD_hole = fem.Constant(domain, PETSc.ScalarType(args.Vinc))
+tdim = domain.topology.dim
+outer_facets = facet_tags.find(1)
+hole_facets  = facet_tags.find(2)
+dofs_out  = fem.locate_dofs_topological(V, tdim-1, outer_facets)
+dofs_hole = fem.locate_dofs_topological(V, tdim-1, hole_facets)
+bc_out  = fem.dirichletbc(uD_out,  dofs_out,  V)
+bc_hole = fem.dirichletbc(uD_hole, dofs_hole, V)
+bcs = [bc_out, bc_hole]
+print("[BC] Dirichlet set: outer→0V, hole→Vinc; dofs:", len(dofs_out), len(dofs_hole))
             f=f_expr,
             eps_fun=eps_fun,
             dirichlet=dirich,
