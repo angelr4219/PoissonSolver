@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="3.0" xmlns:xi="https://www.w3.org/2001/XInclude">
+  <Domain>
+    <Grid Name="mesh" GridType="Uniform">
+      <Topology TopologyType="Tetrahedron" NumberOfElements="131712" NodesPerElement="4">
+        <DataItem Dimensions="131712 4" NumberType="Int" Format="HDF">phi_z0.20_V0.10.h5:/Mesh/mesh/topology</DataItem>
+      </Topology>
+      <Geometry GeometryType="XYZ">
+        <DataItem Dimensions="24389 3" Format="HDF">phi_z0.20_V0.10.h5:/Mesh/mesh/geometry</DataItem>
+      </Geometry>
+    </Grid>
+    <Grid Name="phi" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="phi" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_z0.20_V0.10.h5:/Function/phi/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="epsilon" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_z0.20_V0.10.h5:/Function/epsilon/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+  </Domain>
+</Xdmf>

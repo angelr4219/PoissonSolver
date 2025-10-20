@@ -1,0 +1,336 @@
+<?xml version="1.0"?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="3.0" xmlns:xi="https://www.w3.org/2001/XInclude">
+  <Domain>
+    <Grid Name="mesh" GridType="Uniform">
+      <Topology TopologyType="Tetrahedron" NumberOfElements="131712" NodesPerElement="4">
+        <DataItem Dimensions="131712 4" NumberType="Int" Format="HDF">phi_sweep_series.h5:/Mesh/mesh/topology</DataItem>
+      </Topology>
+      <Geometry GeometryType="XYZ">
+        <DataItem Dimensions="24389 3" Format="HDF">phi_sweep_series.h5:/Mesh/mesh/geometry</DataItem>
+      </Geometry>
+    </Grid>
+    <Grid Name="phi_z0.20_V0.00" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.20_V0.00" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="phi_z0.20_V0.00" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.20_V0.00/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="epsilon" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/0</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="1" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/1</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="2" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/2</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="3" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/3</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="4" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/4</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="5" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/5</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="6" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/6</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="7" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/7</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="8" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/8</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="9" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/9</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="10" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/10</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="11" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/11</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="12" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/12</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="13" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/13</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="14" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/14</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="15" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/15</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="16" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/16</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="17" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/17</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="18" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/18</DataItem>
+        </Attribute>
+      </Grid>
+      <Grid Name="epsilon" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="19" />
+        <Attribute Name="epsilon" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="131712 1" Format="HDF">phi_sweep_series.h5:/Function/epsilon/19</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.20_V0.10" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.20_V0.10" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="1" />
+        <Attribute Name="phi_z0.20_V0.10" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.20_V0.10/1</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.20_V0.20" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.20_V0.20" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="2" />
+        <Attribute Name="phi_z0.20_V0.20" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.20_V0.20/2</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.20_V0.30" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.20_V0.30" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="3" />
+        <Attribute Name="phi_z0.20_V0.30" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.20_V0.30/3</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.35_V0.00" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.35_V0.00" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="4" />
+        <Attribute Name="phi_z0.35_V0.00" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.35_V0.00/4</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.35_V0.10" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.35_V0.10" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="5" />
+        <Attribute Name="phi_z0.35_V0.10" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.35_V0.10/5</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.35_V0.20" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.35_V0.20" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="6" />
+        <Attribute Name="phi_z0.35_V0.20" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.35_V0.20/6</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.35_V0.30" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.35_V0.30" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="7" />
+        <Attribute Name="phi_z0.35_V0.30" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.35_V0.30/7</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.50_V0.00" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.50_V0.00" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="8" />
+        <Attribute Name="phi_z0.50_V0.00" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.50_V0.00/8</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.50_V0.10" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.50_V0.10" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="9" />
+        <Attribute Name="phi_z0.50_V0.10" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.50_V0.10/9</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.50_V0.20" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.50_V0.20" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="10" />
+        <Attribute Name="phi_z0.50_V0.20" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.50_V0.20/10</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.50_V0.30" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.50_V0.30" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="11" />
+        <Attribute Name="phi_z0.50_V0.30" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.50_V0.30/11</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.65_V0.00" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.65_V0.00" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="12" />
+        <Attribute Name="phi_z0.65_V0.00" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.65_V0.00/12</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.65_V0.10" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.65_V0.10" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="13" />
+        <Attribute Name="phi_z0.65_V0.10" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.65_V0.10/13</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.65_V0.20" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.65_V0.20" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="14" />
+        <Attribute Name="phi_z0.65_V0.20" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.65_V0.20/14</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.65_V0.30" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.65_V0.30" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="15" />
+        <Attribute Name="phi_z0.65_V0.30" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.65_V0.30/15</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.80_V0.00" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.80_V0.00" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="16" />
+        <Attribute Name="phi_z0.80_V0.00" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.80_V0.00/16</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.80_V0.10" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.80_V0.10" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="17" />
+        <Attribute Name="phi_z0.80_V0.10" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.80_V0.10/17</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.80_V0.20" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.80_V0.20" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="18" />
+        <Attribute Name="phi_z0.80_V0.20" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.80_V0.20/18</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="phi_z0.80_V0.30" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="phi_z0.80_V0.30" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="19" />
+        <Attribute Name="phi_z0.80_V0.30" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="24389 1" Format="HDF">phi_sweep_series.h5:/Function/phi_z0.80_V0.30/19</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+  </Domain>
+</Xdmf>

@@ -12,13 +12,6 @@ __pycache__/
 .vscode/
 .idea/
 
-# Results / large files
-results/
-results/**/*
-*.h5
-*.xdmf
-*.png
-*.csv
 
 # Docker
 *.log
@@ -44,3 +37,7 @@ results/*.pvsm
 # Docker & env
 .env
 *.ipynb_checkpoints/
+
+# Keep verification outputs for review
+!Results/
+!Results/**
