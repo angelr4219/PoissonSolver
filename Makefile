@@ -97,3 +97,22 @@ clean:
 
 really-clean: clean
 	@rm -rf __pycache__ .pytest_cache .mypy_cache .ruff_cache build
+
+.PHONY: verify verify-line
+tau ?= 1e-9
+verify:
+	@python3 verify/compare_rect_vs_analytic.py \
+		--phi-xdmf $(PHI) \
+		--a $(A) \
+		--xs $(XS) \
+		--Vs $(VS) \
+		--tau ${tau} || true
+verify-line:
+	@python3 verify/compare_rect_vs_analytic.py \
+		--phi-xdmf $(PHI) \
+		--a $(A) \
+		--xs $(XS) \
+		--Vs $(VS) \
+		--z $(Z) \
+		--sample-line $(Y) $(Z) $(X0) $(X1) $(N) \
+		--tau ${tau} || true
