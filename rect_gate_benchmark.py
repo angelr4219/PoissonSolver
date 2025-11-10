@@ -105,7 +105,7 @@ def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
         "ksp_rtol": 1e-10,
         "ksp_error_if_not_converged": True
     }
-    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_opts)
+    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_opts, petsc_options_prefix="poisson_")
     uh = problem.solve()
     uh.name = "phi"
 
