@@ -1,0 +1,5 @@
+-ksp_type cg
+-ksp_rtol 1e-9
+-ksp_converged_reason
+-pc_type hypre
+-pc_hypre_type boomeramg
