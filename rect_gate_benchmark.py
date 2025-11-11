@@ -147,7 +147,60 @@ def run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix):
     from exact_rect_gates import phi0_rect_three_gates_factory
     os.makedirs("results", exist_ok=True)
     exact_fun = phi0_rect_three_gates_factory(a, zbar, xs_gates, Vs_gates)
-    metrics = report_errors(domain, uh, exact_fun, out_prefix=f"{outprefix}_err", qdeg=4)
+    # ---- Metrics vs analytic (safe for 0.10) ----
+    from dolfinx import fem, io
+    import ufl, numpy as np
+
+    def _phi0_on_dofs(X):
+        # X has shape (3, N) in dolfinx 0.10
+        vals = np.empty(X.shape[1], dtype=float)
+        for i in range(X.shape[1]):
+            vals[i] = phi0_rect_local(X[0, i], X[1, i], X[2, i], a, xs_gates, Vs_gates)
+        return vals
+
+    uE = fem.Function(uh.function_space, name="phi_exact")
+    uE.interpolate(_phi0_on_dofs)
+
+    # L2 and H1-seminorm of error (assemble_scalar)
+    e   = uh - uE
+    dxf = ufl.dx(metadata={"quadrature_degree": 4})
+    L2_sq  = fem.assemble_scalar(fem.form(e*e*dxf))
+    H1s_sq = fem.assemble_scalar(fem.form(ufl.inner(ufl.grad(e), ufl.grad(e))*dxf))
+    L2  = float(np.sqrt(max(L2_sq,  0.0)))
+    H1s = float(np.sqrt(max(H1s_sq, 0.0)))
+    Linf = float(np.max(np.abs(uh.x.array))) if uh.x.array.size else 0.0
+
+    # Persist a tiny JSON summary
+    from pathlib import Path, PurePath
+    met_json = f"{outprefix}_metrics.json"
+    Path(PurePath(met_json)).write_text(json.dumps(
+        {"tag": tag, "degree": deg,
+        "dofs": int(uh.function_space.dofmap.index_map.size_local
+                    * uh.function_space.dofmap.index_map_bs),
+        "l2": L2, "h1s": H1s, "linf": Linf}, indent=2))
+    print(f"[METRICS] wrote {met_json}")
+    # ---- Optional DG0 relative-error heatmap (err_rel) ----
+    from dolfinx.fem.petsc import LinearProblem
+    W = fem.functionspace(domain, ("Discontinuous Lagrange", 0))
+    uT, v = ufl.TrialFunction(W), ufl.TestFunction(W)
+    dxm = ufl.dx(metadata={"quadrature_degree": 4})
+
+    tau = 1e-9
+    num = ufl.sqrt(ufl.max_value(e*e, 0.0))
+    den = ufl.sqrt(ufl.max_value(uE*uE, 0.0)) + tau
+    f_rel = num/den
+
+    aP = ufl.inner(uT, v) * dxm
+    bP = ufl.inner(f_rel, v) * dxm
+    w_rel = LinearProblem(aP, bP,
+                        petsc_options={"ksp_type":"preonly","pc_type":"lu"},
+                        petsc_options_prefix="proj_").solve()
+    w_rel.name = "err_rel"
+    with io.XDMFFile(domain.comm, f"{outprefix}_relerr.xdmf", "w") as xo:
+        xo.write_mesh(domain); xo.write_function(w_rel)
+    print(f"[WRITE] {outprefix}_relerr.xdmf (err_rel vs analytic)")
+
+
     # --- Relative error: (exact - solution) / exact ---
     # Pointwise field for ParaView and global relative metrics for CSV
     # Build exact field in same space
