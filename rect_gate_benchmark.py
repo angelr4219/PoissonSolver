@@ -105,7 +105,7 @@ def solve_laplace(V, bcs, eps_r=11.7, eps0=8.8541878128e-12):
         "ksp_rtol": 1e-10,
         "ksp_error_if_not_converged": True
     }
-    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_opts)
+    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_opts, petsc_options_prefix="poisson_")
     uh = problem.solve()
     uh.name = "phi"
 
@@ -147,7 +147,60 @@ def run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix):
     from exact_rect_gates import phi0_rect_three_gates_factory
     os.makedirs("results", exist_ok=True)
     exact_fun = phi0_rect_three_gates_factory(a, zbar, xs_gates, Vs_gates)
-    metrics = report_errors(domain, uh, exact_fun, out_prefix=f"{outprefix}_err", qdeg=4)
+    # ---- Metrics vs analytic (safe for 0.10) ----
+    from dolfinx import fem, io
+    import ufl, numpy as np
+
+    def _phi0_on_dofs(X):
+        # X has shape (3, N) in dolfinx 0.10
+        vals = np.empty(X.shape[1], dtype=float)
+        for i in range(X.shape[1]):
+            vals[i] = phi0_rect_local(X[0, i], X[1, i], X[2, i], a, xs_gates, Vs_gates)
+        return vals
+
+    uE = fem.Function(uh.function_space, name="phi_exact")
+    uE.interpolate(_phi0_on_dofs)
+
+    # L2 and H1-seminorm of error (assemble_scalar)
+    e   = uh - uE
+    dxf = ufl.dx(metadata={"quadrature_degree": 4})
+    L2_sq  = fem.assemble_scalar(fem.form(e*e*dxf))
+    H1s_sq = fem.assemble_scalar(fem.form(ufl.inner(ufl.grad(e), ufl.grad(e))*dxf))
+    L2  = float(np.sqrt(max(L2_sq,  0.0)))
+    H1s = float(np.sqrt(max(H1s_sq, 0.0)))
+    Linf = float(np.max(np.abs(uh.x.array))) if uh.x.array.size else 0.0
+
+    # Persist a tiny JSON summary
+    from pathlib import Path, PurePath
+    met_json = f"{outprefix}_metrics.json"
+    Path(PurePath(met_json)).write_text(json.dumps(
+        {"tag": tag, "degree": deg,
+        "dofs": int(uh.function_space.dofmap.index_map.size_local
+                    * uh.function_space.dofmap.index_map_bs),
+        "l2": L2, "h1s": H1s, "linf": Linf}, indent=2))
+    print(f"[METRICS] wrote {met_json}")
+    # ---- Optional DG0 relative-error heatmap (err_rel) ----
+    from dolfinx.fem.petsc import LinearProblem
+    W = fem.functionspace(domain, ("Discontinuous Lagrange", 0))
+    uT, v = ufl.TrialFunction(W), ufl.TestFunction(W)
+    dxm = ufl.dx(metadata={"quadrature_degree": 4})
+
+    tau = 1e-9
+    num = ufl.sqrt(ufl.max_value(e*e, 0.0))
+    den = ufl.sqrt(ufl.max_value(uE*uE, 0.0)) + tau
+    f_rel = num/den
+
+    aP = ufl.inner(uT, v) * dxm
+    bP = ufl.inner(f_rel, v) * dxm
+    w_rel = LinearProblem(aP, bP,
+                        petsc_options={"ksp_type":"preonly","pc_type":"lu"},
+                        petsc_options_prefix="proj_").solve()
+    w_rel.name = "err_rel"
+    with io.XDMFFile(domain.comm, f"{outprefix}_relerr.xdmf", "w") as xo:
+        xo.write_mesh(domain); xo.write_function(w_rel)
+    print(f"[WRITE] {outprefix}_relerr.xdmf (err_rel vs analytic)")
+
+
     # --- Relative error: (exact - solution) / exact ---
     # Pointwise field for ParaView and global relative metrics for CSV
     # Build exact field in same space
@@ -253,3 +306,145 @@ if __name__ == "__main__":
         Lx = Ly = 2*p*a
         tag = f"p{int(p)}a"
         run_once(Lx, Ly, H, h, a, xs_gates, Vs_gates, zbar, outprefix=f"results/phi_{tag}")
+# === appended: write error fields to XDMF ==============================
+try:
+    import os, ufl
+    from src.error_fields import write_error_fields_xdmf
+    try:
+        # Adjust if your function lives elsewhere
+        from exact_rect_gates import rect_gates_phi_ufl
+    except Exception:
+        # Fallback: assume it's already imported in this script
+        pass
+
+    # Only run if main-level variables exist
+    _have = all(name in globals() for name in ["domain", "V", "uh", "args"])
+    if _have:
+        x = ufl.SpatialCoordinate(domain)
+        # Build analytic UFL expression — adjust args/params as needed to match your function signature
+        if "rect_gates_phi_ufl" in globals():
+            phi_exact_ufl = rect_gates_phi_ufl(
+                x[0], x[1], x[2],
+                a=getattr(args, "a", 70e-9),
+                vp1=getattr(args, "vp1", 0.25),
+                vx=getattr(args, "vx", 0.10),
+                vp2=getattr(args, "vp2", 0.25),
+            )
+        else:
+            raise NameError("rect_gates_phi_ufl not found. Import it or change call here.")
+
+        out_xdmf = os.path.join(getattr(args, "outdir", "results"), "error_fields.xdmf")
+        write_error_fields_xdmf(domain, V, uh, phi_exact_ufl, out_xdmf, tau=1e-9)
+    else:
+        print("[ERROR-FIELDS] Skipped writing errors (domain/V/uh/args not in scope).")
+except Exception as _e:
+    print("[ERROR-FIELDS] Failed to write error fields:", _e)
+# ======================================================================
+# === appended: write error fields to XDMF ==============================
+try:
+    import os, ufl
+    from src.error_fields import write_error_fields_xdmf
+    try:
+        # Adjust if your function lives elsewhere
+        from exact_rect_gates import rect_gates_phi_ufl
+    except Exception:
+        # Fallback: assume it's already imported in this script
+        pass
+
+    # Only run if main-level variables exist
+    _have = all(name in globals() for name in ["domain", "V", "uh", "args"])
+    if _have:
+        x = ufl.SpatialCoordinate(domain)
+        # Build analytic UFL expression — adjust args/params as needed to match your function signature
+        if "rect_gates_phi_ufl" in globals():
+            phi_exact_ufl = rect_gates_phi_ufl(
+                x[0], x[1], x[2],
+                a=getattr(args, "a", 70e-9),
+                vp1=getattr(args, "vp1", 0.25),
+                vx=getattr(args, "vx", 0.10),
+                vp2=getattr(args, "vp2", 0.25),
+            )
+        else:
+            raise NameError("rect_gates_phi_ufl not found. Import it or change call here.")
+
+        out_xdmf = os.path.join(getattr(args, "outdir", "results"), "error_fields.xdmf")
+        write_error_fields_xdmf(domain, V, uh, phi_exact_ufl, out_xdmf, tau=1e-9)
+    else:
+        print("[ERROR-FIELDS] Skipped writing errors (domain/V/uh/args not in scope).")
+except Exception as _e:
+    print("[ERROR-FIELDS] Failed to write error fields:", _e)
+# ======================================================================
+# ==== AUTO ERROR-MAP HOOK (appended) =======================================
+# When phi (or uh) is written to XDMF, also write error fields to <outdir>/phi_error.xdmf
+# Pulls a, vp1, vx, vp2, outdir from sys.argv (the same flags you already pass).
+import sys, os, re
+import ufl
+from dolfinx import io as _io, fem as _fem
+
+# optional dependency: exact_rect_gates.rect_gates_phi(x,y,z, a=..., vp1=..., vx=..., vp2=...)
+try:
+    from exact_rect_gates import rect_gates_phi as _rect_phi
+except Exception as _e:
+    _rect_phi = None
+
+# helper provided earlier (make sure src/error_fields.py exists)
+try:
+    from src.error_fields import write_error_fields_xdmf as _write_err
+except Exception as _e:
+    _write_err = None
+
+def _parse_flag(name, default=None, cast=float):
+    """Parse --name <value> from sys.argv."""
+    if isinstance(name, str) and not name.startswith("--"):
+        name = f"--{name}"
+    try:
+        i = sys.argv.index(name)
+        return cast(sys.argv[i+1])
+    except Exception:
+        return default
+
+def _outdir_default():
+    try:
+        i = sys.argv.index("--outdir")
+        return sys.argv[i+1]
+    except Exception:
+        return "results"
+
+# Guard to avoid double-writing
+_set_hook = getattr(sys.modules[__name__], "_err_hook_set", False)
+
+if not _set_hook and _rect_phi is not None and _write_err is not None:
+    _orig_write_fn = _io.XDMFFile.write_function
+
+    def _write_function_with_error(self, u, *args, **kwargs):
+        # call original writer first
+        _orig_write_fn(self, u, *args, **kwargs)
+        try:
+            name = getattr(u, "name", "")
+            if name not in ("phi", "uh"):
+                return
+            # gather params from argv
+            a   = _parse_flag("a",   70e-9)
+            vp1 = _parse_flag("vp1", 0.25)
+            vx  = _parse_flag("vx",  0.10)
+            vp2 = _parse_flag("vp2", 0.25)
+            outdir = _outdir_default()
+            # build analytic UFL on the same mesh/space
+            V = u.function_space
+            mesh = V.mesh
+            x = ufl.SpatialCoordinate(mesh)
+            phi_exact = _rect_phi(x[0], x[1], x[2], a=a, vp1=vp1, vx=vx, vp2=vp2)
+            # choose outfile path next to your main phi output
+            out_xdmf = os.path.join(outdir, "phi_error.xdmf")
+            _write_err(mesh, V, u, phi_exact, out_xdmf, tau=1e-9)
+        except Exception as _ee:
+            # keep the main solve robust; only warn
+            try:
+                print("[ERROR-FIELDS] Skipped writing error fields:", _ee)
+            except Exception:
+                pass
+
+    _io.XDMFFile.write_function = _write_function_with_error
+    _err_hook_set = True
+# ==========================================================================
+
