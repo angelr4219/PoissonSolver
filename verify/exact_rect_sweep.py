@@ -1,0 +1,114 @@
+import os, time, csv, json, sys
+from pathlib import Path
+import numpy as np
+from mpi4py import MPI
+from dolfinx import mesh, fem
+from dolfinx.fem.petsc import LinearProblem
+import ufl
+
+# ---- User params (can override via env) ----
+a      = float(os.environ.get("A",      3.5e-8))
+pad    = float(os.environ.get("PAD",    3.0))     # lateral padding in units of (2a)
+H      = float(os.environ.get("H",      3.5e-8))  # device thickness (z from -H to 0)
+xs     = [float(x) for x in os.environ.get("XS", "-7.0e-8,0.0,7.0e-8").split(",")]
+Vs     = [float(v) for v in os.environ.get("VS",  "0.25,0.10,0.25").split(",")]
+
+deg    = int(os.environ.get("DEG", "2"))
+# NXS can be like "8,12,16,24,32" or "64,96,128,192"
+NXS    = os.environ.get("NXS", "32,48,64,96,128")
+nxs    = [int(s) for s in NXS.split(",") if s.strip()]
+
+out_csv = Path(f"results/exact_rect_sweep_deg{deg}.csv")
+out_csv.parent.mkdir(parents=True, exist_ok=True)
+
+# ---- Bring in your exact factory ----
+sys.path.append("/app")
+import exact_rect_gates as ERG
+
+# Construct the exact potential function with signature fallback
+try:
+    # Newer signature: (a, xs, Vs, Vgates)
+    phi_factory = ERG.phi0_rect_three_gates_factory(a, xs, Vs, Vs)
+except TypeError:
+    # Older signature: (a, xs, Vs)
+    phi_factory = ERG.phi0_rect_three_gates_factory(a, xs, Vs)
+
+def phi_exact_eval(xyz: np.ndarray) -> np.ndarray:
+    vals = np.empty(xyz.shape[0], dtype=float)
+    for i,(x,y,z) in enumerate(xyz):
+        vals[i] = float(phi_factory(x, y, z))
+    return vals
+
+def run_once(nx: int) -> dict:
+    # Domain box: x,y in [-L, L], z in [-H, 0]
+    L = pad * 2.0 * a
+    bounds = np.array([[-L, -L, -H], [L, L, 0.0]], dtype=float)
+
+    # Proportional nz to keep reasonable aspect ratio
+    nz = max(4, int(nx * (H / (2.0*L)) + 0.5))  # 2L = total lateral extent
+    n = [nx, nx, nz]
+
+    domain = mesh.create_box(MPI.COMM_WORLD, [bounds[0], bounds[1]],
+                             n, cell_type=mesh.CellType.tetrahedron)
+
+    V = fem.functionspace(domain, ("Lagrange", deg))
+    u = ufl.TrialFunction(V); v = ufl.TestFunction(V)
+    a_form = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    L_form = fem.Constant(domain, 0.0) * v * ufl.dx
+
+    # Dirichlet = exact potential on all boundary faces of the box
+    uD = fem.Function(V, name="phi_D")
+    xall = V.tabulate_dof_coordinates().reshape((-1, 3))
+    uD.x.array[:] = phi_exact_eval(xall)
+
+    x0, y0, z0 = bounds[0]; x1, y1, z1 = bounds[1]
+    def on_boundary(x):
+        return np.isclose(x[0], x0) | np.isclose(x[0], x1) | \
+               np.isclose(x[1], y0) | np.isclose(x[1], y1) | \
+               np.isclose(x[2], z0) | np.isclose(x[2], z1)
+
+    bdofs = fem.locate_dofs_geometrical(V, on_boundary)
+    bcs = [fem.dirichletbc(uD, bdofs)]
+
+    t0 = time.perf_counter()
+    problem = LinearProblem(a_form, L_form, bcs=bcs)
+    uh = problem.solve()
+    uh.name = "phi"
+    t_solve = time.perf_counter() - t0
+
+    # Build exact in V for error norms
+    uE = fem.Function(V, name="phi_exact")
+    uE.x.array[:] = uD.x.array
+
+    e = uh - uE
+    L2 = np.sqrt(fem.assemble_scalar(fem.form(ufl.inner(e, e) * ufl.dx)))
+    H1 = np.sqrt(fem.assemble_scalar(fem.form(ufl.inner(ufl.grad(e), ufl.grad(e)) * ufl.dx)))
+
+    # Mesh sizes
+    domain.topology.create_connectivity(domain.topology.dim, domain.topology.dim)
+    ncells = domain.topology.index_map(domain.topology.dim).size_global
+    npts   = domain.topology.index_map(0).size_global
+    dof    = V.dofmap.index_map.size_global
+    h_est  = (2.0*L)/nx
+
+    return dict(nx=nx, nz=nz, dof=int(dof), cells=int(ncells), points=int(npts),
+                h=h_est, L2=L2, H1=H1, t_total=t_solve)
+
+def main():
+    rows=[]
+    print(f"[exact_rect_sweep] deg={deg}  nxs={nxs}")
+    for nx in nxs:
+        r = run_once(nx)
+        print(json.dumps(r))
+        rows.append(r)
+    with out_csv.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["deg","nx","nz","dof","cells","points","h","L2","H1","t_total"])
+        for r in rows:
+            w.writerow([deg, r["nx"], r["nz"], r["dof"], r["cells"], r["points"],
+                        f"{r['h']:.6e}", f"{r['L2']:.6e}", f"{r['H1']:.6e}",
+                        f"{r['t_total']:.3f}"])
+    print("Wrote", out_csv)
+
+if __name__ == "__main__":
+    main()

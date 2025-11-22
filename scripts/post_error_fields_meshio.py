@@ -1,3 +1,83 @@
+<<<<<<< HEAD
+# Compare vs analytic (robust quoting)
+mkdir -p "$CMPDIR"
+
+for f in "$STAGEA"/p*a_deg1.xdmf "$STAGEB"/p*a_deg*.xdmf; do
+  base=$(basename "$f" .xdmf)
+  out="$CMPDIR/${base}.json"
+  FIELD=phi
+  [[ "$base" == *_deg0proj ]] && FIELD=phi_dg0
+
+  docker run --rm \
+    -e A="${A}" -e XS="${XS}" -e VS="${VS}" \
+    -e FIELD="${FIELD}" -e IN="$f" -e OUT="$out" \
+    -v "$PWD":/app -w /app "$IMAGE" bash -lc '
+cat >/tmp/compare_inline.py <<'"'"'PY'"'"'
+import os, json, numpy as np
+from mpi4py import MPI
+from dolfinx import fem, io  # Ensure dolfinx is installed
+import ufl  # Ensure ufl is installed
+
+infile  = os.environ["IN"]
+outfile = os.environ["OUT"]
+field   = os.environ["FIELD"]          # "phi" or "phi_dg0"
+a       = float(os.environ["A"])
+xs      = np.array(json.loads(os.environ["XS"]), dtype=float)
+Vs      = np.array(json.loads(os.environ["VS"]), dtype=float)
+qdeg    = 4
+
+def g_uvz(u, v, z):
+    return (1.0/(2.0*np.pi)) * np.arctan2(u*v, z*np.sqrt(u*u + v*v + z*z))
+
+def phi0_rect_local(x, y, z, a, xs, Vs):
+    z = z if z != 0.0 else np.finfo(float).eps
+    s = 0.0
+    for xi, Vi in zip(xs, Vs):
+        s += Vi * (
+            g_uvz(a - xi + x, a + y, z) +
+            g_uvz(a - xi + x, a - y, z) +
+            g_uvz(a + xi - x, a + y, z) +
+            g_uvz(a + xi - x, a - y, z)
+        )
+    return -s
+
+comm = MPI.COMM_WORLD
+with io.XDMFFile(comm, infile, "r") as xf:
+    msh = xf.read_mesh()
+    if field == "phi":
+        V = fem.functionspace(msh, ("Lagrange", 1))
+    else:
+        V = fem.functionspace(msh, ("Discontinuous Lagrange", 0))
+    uh = fem.Function(V, name=field)
+    xf.read_function(uh, name=field)
+
+uE = fem.Function(V, name="phi_exact")
+def eval_exact(x):
+    return np.array([phi0_rect_local(x[0,i], x[1,i], x[2,i], a, xs, Vs) for i in range(x.shape[1])], dtype=float)
+uE.interpolate(eval_exact)
+
+metadata = {"quadrature_degree": qdeg}
+dxm = ufl.dx(metadata=metadata)
+e = uh - uE
+L2_sq  = fem.assemble_scalar(fem.form(e*e*dxm))
+H1s_sq = fem.assemble_scalar(fem.form(ufl.inner(ufl.grad(e), ufl.grad(e))*dxm))
+L2  = float(np.sqrt(max(L2_sq, 0.0)))
+H1s = float(np.sqrt(max(H1s_sq, 0.0)))
+Linf = float(np.max(np.abs(uh.x.array))) if uh.x.array.size else 0.0
+
+imap = V.dofmap.index_map
+dofs = int(imap.size_local * imap.bs)
+
+if comm.rank == 0:
+    with open(outfile, "w") as fh:
+        json.dump({"l2": L2, "h1s": H1s, "linf": Linf,
+                   "dofs": dofs, "cell_mean": None,
+                   "assemble_s": None, "solve_s": None}, fh)
+PY
+python /tmp/compare_inline.py
+'
+done
+=======
 import os, argparse, importlib, inspect, ast, json
 import numpy as np
 import ufl, meshio
@@ -122,3 +202,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+>>>>>>> 7b176cafc436c4f4f7c51f1364ef42c02d769d99

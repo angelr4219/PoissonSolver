@@ -4,18 +4,13 @@ set -euo pipefail
 if [[ $# -lt 2 ]]; then
   cat <<USAGE
 Usage:
-  $0 --phi-xdmf results/phi_p3a.xdmf --a 3.5e-8 --zbar 3.5e-8 \
+  $0 --phi-xdmf results/phi_p2a.xdmf --a 3.5e-8 --zbar 3.5e-8 \
      --xs '[-7.0e-8,0,7.0e-8]' --Vs '[0.25,0.10,0.25]'
-
-Notes:
-- If verify/ is NOT a Python package, we call the script by path instead of -m.
-- Pass JSON-style lists for --xs and --Vs (with brackets), unless your script expects CSV.
 USAGE
   exit 1
 fi
 
-# Decide how to call the tool
-ENTRY=""
+# choose entrypoint: package vs file path
 if [[ -f verify/__init__.py ]]; then
   ENTRY=(-m verify.compare_rect_vs_analytic)
 elif [[ -f verify/compare_rect_vs_analytic.py ]]; then
@@ -25,15 +20,12 @@ else
   exit 2
 fi
 
-# Timestamped output dir to avoid overwrites
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUTDIR="results/verify/${STAMP}"
 mkdir -p "$OUTDIR"
 
-# Run the compare script (args forwarded)
 echo "==> Writing outputs to: $OUTDIR"
 PYTHONPATH="." python3 "${ENTRY[@]}" "$@" --outdir "$OUTDIR"
 
-# Show what got produced
 echo "==> Produced files:"
 find "$OUTDIR" -maxdepth 1 -type f -print | sort

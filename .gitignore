@@ -41,3 +41,7 @@ results/*.pvsm
 # Keep verification outputs for review
 !Results/
 !Results/**
+Results/
+*.h5
+*.xdmf
+*.xdmf/*.h5
