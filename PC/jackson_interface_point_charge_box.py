@@ -1,21 +1,47 @@
 #!/usr/bin/env python3
 """
-DOLFINx: Poisson in a 3D box with multiple point charges + 1D analytic check.
+DOLFINx: Jackson dielectric interface test with a single point charge.
 
-Solve
-    -∇·(ε ∇φ) = ρ
-with ε = ε_r * ε0 and ρ a sum of smoothed point charges in a rectangular box.
+Geometry:
+  - 3D rectangular box with interface at z = 0.
+  - Top region (z > 0):  epsilon_1 = eps_r_top * eps0
+  - Bottom region (z < 0): epsilon_2 = eps_r_bot * eps0
+  - One point charge q located at (x0, y0, z0) with z0 > 0 (in top region).
+
+We solve
+    -∇·(ε(x) ∇φ) = ρ
+with
+    ε(x) = eps_r_top * eps0  for z >= 0
+         = eps_r_bot * eps0  for z <  0
+and ρ a smoothed Gaussian approximation to a point charge.
 
 All boundaries use Dirichlet φ = 0 (grounded box).
 
-Extras:
-  * Evaluate analytic Coulomb potential from the same point charges
-    along a 1D line (z-slice at fixed x,y).
-  * Evaluate numerical φ along the same line.
+Verification:
+  * Evaluate analytic Jackson image-charge potential along a 1D line
+    (z-line at fixed x,y).
+  * Compare numerical φ from FEniCS to analytic φ_Jackson.
   * Write CSV with columns:
-        x, y, z, phi_num, phi_analytic, abs_error, rel_error
+        x, y, z, phi_num, phi_jackson, abs_error, rel_error
   * Print summary error metrics.
-  * Also compute E = -∇φ and write it to the XDMF file.
+
+Example (charge at z0 = 10 nm above interface):
+
+  docker run --rm -v "$PWD":/app -w /app dolfinx/dolfinx:stable bash -lc '
+    export PETSC_OPTIONS="-ksp_type cg -pc_type gamg"
+    /dolfinx-env/bin/python3 PC/jackson_interface_point_charge_box.py \
+      --Lx 8e-8 --Ly 8e-8 --H 8e-8 --h 5e-9 \
+      --epsr-top 3.9 --epsr-bot 11.7 \
+      --q "[1.602176634e-19]" \
+      --x0 "[0.0]" --y0 "[0.0]" --z0 "[1.0e-8]" \
+      --sigma 5e-9 \
+      --deg 1 \
+      --x-probe 0.0 --y-probe 0.0 \
+      --z-min -4e-8 --z-max 4e-8 --npts 401 \
+      --run-root results/jackson_interface_d10nm \
+      --basename jackson_interface
+  '
+
 """
 
 import argparse
@@ -37,7 +63,10 @@ EPS0 = 8.8541878128e-12  # vacuum permittivity [F/m]
 # ---------- Utilities ----------
 
 def parse_list(s, n_expected=None, name=""):
-    """Parse JSON-like list string, e.g. "[1.0, 2.0, 3.0]". Optionally check length."""
+    """
+    Parse JSON-like list string, e.g. "[1.0, 2.0, 3.0]".
+    Optionally check length.
+    """
     try:
         vals = json.loads(s)
     except Exception as exc:
@@ -90,11 +119,12 @@ def gaussian_rho_multi(V, xq, yq, zq, q, sigma):
     ρ(r) = ∑_i q_i * G_i(r)
     with ∫ G_i dV = 1, so ∫ ρ dV = ∑ q_i.
 
-    We implement in physical units (C/m^3).
+    Implemented in physical units (C/m^3).
     """
-    x = V.tabulate_dof_coordinates()[:, 0]
-    y = V.tabulate_dof_coordinates()[:, 1]
-    z = V.tabulate_dof_coordinates()[:, 2]
+    coords = V.tabulate_dof_coordinates()
+    x = coords[:, 0]
+    y = coords[:, 1]
+    z = coords[:, 2]
 
     ndof = x.shape[0]
     n_q = len(q)
@@ -110,7 +140,9 @@ def gaussian_rho_multi(V, xq, yq, zq, q, sigma):
         r2 = dx * dx + dy * dy + dz * dz
         rho_vals += q[i] * norm * np.exp(-0.5 * r2 / (sigma ** 2))
 
+    # Wrap as FEniCSx Function
     rho = fem.Function(V)
+    # Newer dolfinx: use rho.x.array instead of rho.vector.localForm()
     rho.x.array[:] = rho_vals
     rho.x.scatter_forward()
 
@@ -126,42 +158,86 @@ def gaussian_rho_multi(V, xq, yq, zq, q, sigma):
     return rho
 
 
-def analytic_phi_multi(x, y, z, xq, yq, zq, q, eps_r, r_min_factor, sigma):
+# ---------- Analytic Jackson potential ----------
+
+def analytic_phi_jackson_interface(
+    x, y, z,
+    xq, yq, zq, q,
+    eps_r_top, eps_r_bot,
+    r_min_factor=0.0,
+):
     """
-    Analytic Coulomb potential of multiple point charges in homogeneous medium:
+    Analytic potential for a single point charge near a planar dielectric interface.
 
-        φ(r) = 1/(4π ε_r ε0) ∑ q_i / |r - r_i|.
+    Geometry:
+      - Interface at z = 0.
+      - Top region (z > 0):  epsilon_1 = eps_r_top * EPS0
+      - Bottom region (z < 0): epsilon_2 = eps_r_bot * EPS0
+      - One real charge q located at (xq, yq, zq) with zq > 0 (in top region).
 
-    We skip points closer than r_min_factor * sigma to *any* charge
-    (set φ_analytic = NaN there) to avoid the singularity.
+    Jackson image-charge result:
+      Region 1 (z > 0):
+        phi_1(r) = 1/(4π ε1) [ q/|r - r0| + q'/|r - r0'| ],
+        r0  = (xq, yq,  zq),
+        r0' = (xq, yq, -zq),
+        q'  = q * (ε1 - ε2)/(ε1 + ε2).
+
+      Region 2 (z < 0):
+        phi_2(r) = 1/(4π ε2) [ q''/|r - r0| ],
+        q'' = q * 2ε2/(ε1 + ε2).
+
+    We optionally mask points closer than r_min_factor * |zq| to avoid the singularity.
     """
     x = np.asarray(x)
     y = np.asarray(y)
     z = np.asarray(z)
-    npts = x.size
-    n_q = len(q)
 
-    phi = np.zeros(npts, dtype=np.double)
-    eps = eps_r * EPS0
-    const = 1.0 / (4.0 * np.pi * eps)
-    r_cut = r_min_factor * sigma
+    # For now, assume exactly one charge
+    assert len(q) == 1, "Jackson analytic: only one charge supported"
+    q_phys = q[0]
+    x0, y0, z0 = xq[0], yq[0], zq[0]
+    if z0 <= 0.0:
+        raise ValueError(
+            "analytic_phi_jackson_interface assumes the charge is in the top region (z0 > 0)."
+        )
 
-    for i in range(n_q):
-        dx = x - xq[i]
-        dy = y - yq[i]
-        dz = z - zq[i]
-        r = np.sqrt(dx * dx + dy * dy + dz * dz)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            phi_i = const * q[i] / r
-        phi_i[~np.isfinite(phi_i)] = np.nan
-        phi += phi_i
+    eps1 = eps_r_top * EPS0
+    eps2 = eps_r_bot * EPS0
 
-    for i in range(n_q):
-        dx = x - xq[i]
-        dy = y - yq[i]
-        dz = z - zq[i]
-        r = np.sqrt(dx * dx + dy * dy + dz * dz)
-        phi[r < r_cut] = np.nan
+    # Distances to real and image charges
+    dx = x - x0
+    dy = y - y0
+    dz_real = z - z0
+    dz_im   = z + z0  # image at (x0, y0, -z0)
+
+    r_real = np.sqrt(dx*dx + dy*dy + dz_real*dz_real)
+    r_im   = np.sqrt(dx*dx + dy*dy + dz_im*dz_im)
+
+    # Image charges
+    q_image  = q_phys * (eps1 - eps2) / (eps1 + eps2)    # q'
+    q_double = q_phys * (2.0 * eps2) / (eps1 + eps2)     # q''
+
+    phi = np.full_like(r_real, np.nan, dtype=float)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # Region 1: z >= 0
+        mask_top = (z >= 0.0)
+        if np.any(mask_top):
+            phi_top = (q_phys / r_real[mask_top] +
+                       q_image / r_im[mask_top])
+            phi[mask_top] = (1.0 / (4.0 * np.pi * eps1)) * phi_top
+
+        # Region 2: z < 0
+        mask_bot = ~mask_top
+        if np.any(mask_bot):
+            phi_bot = q_double / r_real[mask_bot]
+            phi[mask_bot] = (1.0 / (4.0 * np.pi * eps2)) * phi_bot
+
+    # Optional masking very near the real charge
+    if r_min_factor > 0.0:
+        r_cut = r_min_factor * abs(z0)
+        near = (r_real < r_cut)
+        phi[near] = np.nan
 
     return phi
 
@@ -169,7 +245,9 @@ def analytic_phi_multi(x, y, z, xq, yq, zq, q, eps_r, r_min_factor, sigma):
 # ---------- Boundary conditions ----------
 
 def grounded_boundary(domain, V):
-    """φ = 0 on all boundaries (Dirichlet BC)."""
+    """
+    φ = 0 on all boundaries (Dirichlet BC).
+    """
     def on_boundary(x):
         return np.full(x.shape[1], True, dtype=bool)
 
@@ -190,35 +268,35 @@ def grounded_boundary(domain, V):
     return [bc]
 
 
-# ---------- 1D line probe + error check ----------
+# ---------- 1D line probe + error check (Jackson) ----------
 
-def lineprobe_z_and_error(domain, phi, params):
+def lineprobe_z_and_error_jackson(domain, phi, params):
     """
-    Evaluate numerical and analytic φ along a z-line at fixed (x_probe, y_probe).
+    Evaluate numerical and analytic (Jackson image-charge) φ along a z-line
+    at fixed (x_probe, y_probe). Write CSV and print error metrics.
 
-    Writes CSV:
-        basename_lineprobe_z.csv
-    with columns:
-        x, y, z, phi_num, phi_analytic, abs_error, rel_error
-
-    Also prints summary error metrics.
+    Requires params:
+      - x_probe, y_probe, z_min, z_max, npts, r_min_factor
+      - eps_r_top, eps_r_bot
+      - xq, yq, zq, q
+      - run_root, basename
     """
     x_probe = params["x_probe"]
     y_probe = params["y_probe"]
-    z_min = params["z_min"]
-    z_max = params["z_max"]
-    npts = params["npts"]
-    eps_r = params["eps_r"]
+    z_min   = params["z_min"]
+    z_max   = params["z_max"]
+    npts    = params["npts"]
+    r_min_factor = params["r_min_factor"]
+    eps_r_top = params["eps_r_top"]
+    eps_r_bot = params["eps_r_bot"]
     xq = params["xq"]
     yq = params["yq"]
     zq = params["zq"]
-    q = params["q"]
-    sigma = params["sigma"]
-    r_min_factor = params["r_min_factor"]
+    q  = params["q"]
     run_root = Path(params["run_root"])
-    basename = params.get("basename", "multi_point_box")
+    basename = params.get("basename", "jackson_interface")
 
-    # Use full mesh extents if z-range unspecified
+    # If z-range not specified, use mesh extents
     if z_min is None or z_max is None:
         coords = domain.geometry.x
         z_min_mesh = np.min(coords[:, 2])
@@ -229,15 +307,16 @@ def lineprobe_z_and_error(domain, phi, params):
             z_max = z_max_mesh
 
     if RANK == 0:
-        print(f"[probe] line along z at (x,y)=({x_probe:g},{y_probe:g}), "
+        print(f"[probe] Jackson line along z at (x,y)=({x_probe:g},{y_probe:g}), "
               f"z ∈ [{z_min:g}, {z_max:g}], npts={npts}")
 
+    # Build line points
     z_vals = np.linspace(z_min, z_max, npts)
     x_vals = np.full_like(z_vals, x_probe)
     y_vals = np.full_like(z_vals, y_probe)
     points = np.vstack([x_vals, y_vals, z_vals]).T
 
-    # Use bounding box tree to find cells and evaluate numerical φ
+    # Bounding box tree to evaluate numerical φ
     bb = geometry.bb_tree(domain, domain.topology.dim)
     candidates = geometry.compute_collisions_points(bb, points)
     colliding_cells = geometry.compute_colliding_cells(domain, candidates, points)
@@ -263,11 +342,16 @@ def lineprobe_z_and_error(domain, phi, params):
         for local_i, global_i in enumerate(idx_on_proc):
             phi_num[global_i] = values[local_i]
 
-    # Analytic potential (Coulomb sum)
-    phi_analytic = analytic_phi_multi(
-        x_vals, y_vals, z_vals, xq, yq, zq, q, eps_r, r_min_factor, sigma
+    # Analytic Jackson potential
+    phi_analytic = analytic_phi_jackson_interface(
+        x_vals, y_vals, z_vals,
+        xq, yq, zq, q,
+        eps_r_top=eps_r_top,
+        eps_r_bot=eps_r_bot,
+        r_min_factor=r_min_factor,
     )
 
+    # Errors
     abs_error = np.full(npts, np.nan, dtype=np.double)
     rel_error = np.full(npts, np.nan, dtype=np.double)
 
@@ -282,28 +366,29 @@ def lineprobe_z_and_error(domain, phi, params):
     if RANK == 0 and np.any(mask):
         max_rel = np.nanmax(rel_error[mask])
         rms_rel = np.sqrt(np.nanmean(rel_error[mask] ** 2))
-        print(f"[error] max rel error (slice) ≈ {max_rel:.3e}")
-        print(f"[error] RMS rel error (slice) ≈ {rms_rel:.3e}")
+        print(f"[error] Jackson max rel error (slice) ≈ {max_rel:.3e}")
+        print(f"[error] Jackson RMS rel error (slice) ≈ {rms_rel:.3e}")
         print(f"[error] points used in error: {np.count_nonzero(mask)} / {npts}")
 
     if RANK == 0:
-        csv_path = run_root / f"{basename}_lineprobe_z.csv"
+        csv_path = run_root / f"{basename}_jackson_lineprobe_z.csv"
         data = np.column_stack(
             [x_vals, y_vals, z_vals, phi_num, phi_analytic, abs_error, rel_error]
         )
-        header = "x,y,z,phi_num,phi_analytic,abs_error,rel_error"
+        header = "x,y,z,phi_num,phi_jackson,abs_error,rel_error"
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="")
-        print(f"[io] wrote line-probe CSV to {csv_path}")
+        print(f"[io] wrote Jackson line-probe CSV to {csv_path}")
 
 
 # ---------- Solver ----------
 
-def solve_poisson_multi_point(params):
+def solve_poisson_jackson(params):
     Lx = params["Lx"]
     Ly = params["Ly"]
     H  = params["H"]
     h  = params["h"]
-    eps_r = params["eps_r"]
+    eps_r_top = params["eps_r_top"]
+    eps_r_bot = params["eps_r_bot"]
     deg = params["deg"]
     xq = params["xq"]
     yq = params["yq"]
@@ -311,29 +396,43 @@ def solve_poisson_multi_point(params):
     q  = params["q"]
     sigma = params["sigma"]
     run_root = Path(params["run_root"])
-    basename = params.get("basename", "multi_point_box")
+    basename = params.get("basename", "jackson_interface")
 
     ensure_dir(run_root)
 
     if RANK == 0:
-        print("=== multi_point_charge_box ===")
+        print("=== Jackson dielectric interface: single point charge ===")
         print(f"Lx={Lx:g}, Ly={Ly:g}, H={H:g}, h≈{h:g}")
-        print(f"eps_r={eps_r}, deg={deg}, sigma={sigma:g}")
-        print(f"{len(q)} charges, q={q}")
+        print(f"eps_r_top={eps_r_top}, eps_r_bot={eps_r_bot}, deg={deg}, sigma={sigma:g}")
+        print(f"charge(s): q={q}, z0={zq}")
 
     domain = build_box(Lx, Ly, H, h)
-
-    # Scalar potential function space
     V_phi = fem.functionspace(domain, ("CG", deg))
 
-    # Permittivity (homogeneous)
-    eps_val = eps_r * EPS0
-    eps = fem.Constant(domain, PETSc.ScalarType(eps_val))
+    # Variable permittivity: eps(x) piecewise based on z
+    x = ufl.SpatialCoordinate(domain)
+    eps_r_expr = ufl.conditional(
+        ufl.ge(x[2], 0.0),
+        eps_r_top,
+        eps_r_bot,
+    )
+    eps = EPS0 * eps_r_expr
+
+    # Build eps_r as a DG0 Function for visualization (top vs bottom permittivity)
+    V_eps = fem.functionspace(domain, ("DG", 0))
+    eps_r_fun = fem.Function(V_eps)
+    eps_r_fun.name = "eps_r"
+
+    def _eps_r_eval(x_arr):
+        # x_arr has shape (3, n); return shape (1, n)
+        return np.where(x_arr[2] >= 0.0, eps_r_top, eps_r_bot)
+
+    eps_r_fun.interpolate(_eps_r_eval)
 
     # Build RHS ρ
     rho = gaussian_rho_multi(V_phi, xq, yq, zq, q, sigma)
 
-    # Variational problem: -∇·(ε∇φ) = ρ  =>  ε ∇φ·∇v dx = ρ v dx
+    # Variational problem: -∇·(ε∇φ) = ρ  =>  ∫ ε ∇φ·∇v dx = ∫ ρ v dx
     phi = ufl.TrialFunction(V_phi)
     v   = ufl.TestFunction(V_phi)
 
@@ -343,28 +442,48 @@ def solve_poisson_multi_point(params):
     bcs = grounded_boundary(domain, V_phi)
 
     problem = LinearProblem(
-        a, L, bcs=bcs, u=None,
+        a,
+        L,
+        petsc_options_prefix="jackson_phi_",
+        bcs=bcs,
+        u=None,
         petsc_options={
             "ksp_type": "cg",
             "pc_type": "gamg",
             "ksp_rtol": 1e-10,
             "ksp_atol": 1e-12,
         },
-        petsc_options_prefix="phi_",
     )
 
     phi_sol = problem.solve()
 
-    # ---- E = -∇φ as a vector CG field (for XDMF / ParaView) ----
-    dim = domain.geometry.dim
-    V_E = fem.functionspace(domain, ("CG", deg, (dim,)))
-    grad_phi = ufl.grad(phi_sol)
-    E = fem.Function(V_E)
-    E.name = "E"
-    E_expr = fem.Expression(-grad_phi, V_E.element.interpolation_points)
-    E.interpolate(E_expr)
+    # Electric field E = -∇φ, projected into a vector-valued CG space
+    V_E = fem.functionspace(domain, ("CG", deg, (domain.geometry.dim,)))
+    E_expr = -ufl.grad(phi_sol)
 
-    # Output XDMF (mesh, phi, rho, E)
+    # L2 projection: find E in V_E such that (E, w) = (-∇φ, w) for all w
+    E_trial = ufl.TrialFunction(V_E)
+    w = ufl.TestFunction(V_E)
+    aE = ufl.inner(E_trial, w) * ufl.dx
+    LE = ufl.inner(E_expr, w) * ufl.dx
+
+    prob_E = LinearProblem(
+        aE,
+        LE,
+        petsc_options_prefix="jackson_E_",
+        bcs=[],
+        u=None,
+        petsc_options={
+            "ksp_type": "cg",
+            "pc_type": "jacobi",
+            "ksp_rtol": 1e-10,
+            "ksp_atol": 1e-12,
+        },
+    )
+    E = prob_E.solve()
+    E.name = "E"
+
+    # Output XDMF
     xdmf_path = run_root / f"{basename}.xdmf"
     with io.XDMFFile(COMM, xdmf_path.as_posix(), "w") as xdmf:
         xdmf.write_mesh(domain)
@@ -373,12 +492,13 @@ def solve_poisson_multi_point(params):
         xdmf.write_function(phi_sol)
         xdmf.write_function(rho)
         xdmf.write_function(E)
+        xdmf.write_function(eps_r_fun)
 
     if RANK == 0:
         print(f"[io] wrote XDMF to {xdmf_path}")
 
-    # 1D slice analytic vs numeric check (φ only)
-    lineprobe_z_and_error(domain, phi_sol, params)
+    # 1D slice analytic vs numeric Jackson check
+    lineprobe_z_and_error_jackson(domain, phi_sol, params)
 
     return domain, V_phi, phi_sol, rho, V_E, E
 
@@ -387,45 +507,50 @@ def solve_poisson_multi_point(params):
 
 def default_params():
     return {
-        "Lx": 1e-7,
-        "Ly": 1e-7,
-        "H":  1e-7,
+        "Lx": 8e-8,
+        "Ly": 8e-8,
+        "H":  8e-8,
         "h":  5e-9,
-        "eps_r": 11.7,
+        "eps_r_top": 3.9,
+        "eps_r_bot": 11.7,
         "deg": 1,
-        "q": np.array([1.602176634e-19]),
+        "q":  np.array([1.602176634e-19]),
         "xq": np.array([0.0]),
         "yq": np.array([0.0]),
-        "zq": np.array([0.0]),
+        "zq": np.array([1.0e-8]),  # 10 nm above interface
         "sigma": 5e-9,
-        "run_root": "results/multi_point_charge_box",
-        "basename": "multi_point_box",
+        "run_root": "results/jackson_interface_d10nm",
+        "basename": "jackson_interface",
         # Probe / verification defaults
         "x_probe": 0.0,
         "y_probe": 0.0,
         "z_min": None,
         "z_max": None,
         "npts": 401,
-        "r_min_factor": 3.0,
+        "r_min_factor": 0.0,  # set >0 to mask near-singularity points
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Poisson solve in 3D box with multiple smoothed point charges, "
-            "plus 1D analytic vs numerical check along a z-line."
+            "Jackson dielectric interface: Poisson solve with variable ε(z) and "
+            "single smoothed point charge, plus 1D analytic vs numerical check "
+            "along a z-line using the image-charge solution."
         )
     )
-    parser.add_argument("--Lx", type=float, default=1e-7)
-    parser.add_argument("--Ly", type=float, default=1e-7)
-    parser.add_argument("--H", type=float, default=1e-7)
+    parser.add_argument("--Lx", type=float, default=8e-8)
+    parser.add_argument("--Ly", type=float, default=8e-8)
+    parser.add_argument("--H", type=float, default=8e-8)
     parser.add_argument("--h", type=float, default=5e-9)
-    parser.add_argument("--epsr", type=float, default=11.7)
+    parser.add_argument("--epsr-top", type=float, default=3.9,
+                        help="relative permittivity in top region (z >= 0)")
+    parser.add_argument("--epsr-bot", type=float, default=11.7,
+                        help="relative permittivity in bottom region (z < 0)")
     parser.add_argument("--deg", type=int, default=1)
     parser.add_argument("--q", type=str,
                         default="[1.602176634e-19]",
-                        help="JSON list of charges in Coulombs")
+                        help="JSON list of charges in Coulombs (use length 1)")
     parser.add_argument("--x0", type=str,
                         default="[0.0]",
                         help="JSON list of x positions (m)")
@@ -433,14 +558,14 @@ def main():
                         default="[0.0]",
                         help="JSON list of y positions (m)")
     parser.add_argument("--z0", type=str,
-                        default="[0.0]",
-                        help="JSON list of z positions (m)")
+                        default="[1.0e-8]",
+                        help="JSON list of z positions (m), default 10 nm")
     parser.add_argument("--sigma", type=float, default=5e-9,
                         help="Gaussian width (m)")
     parser.add_argument("--run-root", type=str,
-                        default="results/multi_point_charge_box")
+                        default="results/jackson_interface_d10nm")
     parser.add_argument("--basename", type=str,
-                        default="multi_point_box")
+                        default="jackson_interface")
 
     # Line-probe options
     parser.add_argument("--x-probe", type=float, default=0.0,
@@ -453,8 +578,8 @@ def main():
                         help="z max for probe line (m); default = top of box")
     parser.add_argument("--npts", type=int, default=401,
                         help="number of probe points along z")
-    parser.add_argument("--r-min-factor", type=float, default=3.0,
-                        help="skip analytic eval where r < r_min_factor * sigma")
+    parser.add_argument("--r-min-factor", type=float, default=0.0,
+                        help="skip analytic eval where r < r_min_factor * |z0| (0 = off)")
 
     args = parser.parse_args()
 
@@ -463,7 +588,8 @@ def main():
     params["Ly"] = args.Ly
     params["H"]  = args.H
     params["h"]  = args.h
-    params["eps_r"] = args.epsr
+    params["eps_r_top"] = args.epsr_top
+    params["eps_r_bot"] = args.epsr_bot
     params["deg"] = args.deg
     params["q"]   = parse_list(args.q, name="q")
     n_q = len(params["q"])
@@ -482,7 +608,11 @@ def main():
     params["npts"] = args.npts
     params["r_min_factor"] = args.r_min_factor
 
-    solve_poisson_multi_point(params)
+    # For analytic Jackson function we currently only support a single charge.
+    if len(params["q"]) != 1:
+        raise ValueError("This Jackson verification script expects exactly one charge (len(q) == 1).")
+
+    solve_poisson_jackson(params)
 
 
 if __name__ == "__main__":

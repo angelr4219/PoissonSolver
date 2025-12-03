@@ -1,0 +1,13 @@
+{
+  "L": 1e-07,
+  "h": 5e-09,
+  "epsr": 1.0,
+  "q": 1.602176634e-19,
+  "x0": "0.0,0.0,1e-8",
+  "sigma": 5e-09,
+  "deg": 1,
+  "bc_label": "dirichlet",
+  "bc_physics": "dirichlet_phi_0_on_boundary",
+  "t_solve_sec": 0.16868083400004252,
+  "t_total_sec": 0.45266162500001883
+}

@@ -15,7 +15,25 @@ Extras:
   * Write CSV with columns:
         x, y, z, phi_num, phi_analytic, abs_error, rel_error
   * Print summary error metrics.
-  * Also compute E = -∇φ and write it to the XDMF file.
+
+Example:
+
+  docker run --rm -v "$PWD":/app -w /app dolfinx/dolfinx:stable bash -lc '
+    export PETSC_OPTIONS="-ksp_type cg -pc_type gamg"
+    /dolfinx-env/bin/python3 PC/multi_point_charge_box.py \
+      --Lx 1e-7 --Ly 1e-7 --H 1e-7 --h 5e-9 \
+      --epsr 11.7 \
+      --q "[1.602176634e-19,-1.602176634e-19]" \
+      --x0 "[0.0, 2.5e-8]" \
+      --y0 "[0.0, 0.0]" \
+      --z0 "[0.0, 0.0]" \
+      --sigma 5e-9 \
+      --deg 1 \
+      --x-probe 0.0 --y-probe 0.0 \
+      --z-min -5e-8 --z-max 5e-8 --npts 401 \
+      --run-root results/multi_point_demo
+  '
+
 """
 
 import argparse
@@ -37,7 +55,10 @@ EPS0 = 8.8541878128e-12  # vacuum permittivity [F/m]
 # ---------- Utilities ----------
 
 def parse_list(s, n_expected=None, name=""):
-    """Parse JSON-like list string, e.g. "[1.0, 2.0, 3.0]". Optionally check length."""
+    """
+    Parse JSON-like list string, e.g. "[1.0, 2.0, 3.0]".
+    Optionally check length.
+    """
     try:
         vals = json.loads(s)
     except Exception as exc:
@@ -110,8 +131,10 @@ def gaussian_rho_multi(V, xq, yq, zq, q, sigma):
         r2 = dx * dx + dy * dy + dz * dz
         rho_vals += q[i] * norm * np.exp(-0.5 * r2 / (sigma ** 2))
 
+    # Wrap as FEniCSx Function
     rho = fem.Function(V)
-    rho.x.array[:] = rho_vals
+    with rho.vector.localForm() as loc:
+        loc.setArray(rho_vals)
     rho.x.scatter_forward()
 
     # Diagnostic: total charge (integral of rho).
@@ -151,11 +174,14 @@ def analytic_phi_multi(x, y, z, xq, yq, zq, q, eps_r, r_min_factor, sigma):
         dy = y - yq[i]
         dz = z - zq[i]
         r = np.sqrt(dx * dx + dy * dy + dz * dz)
+        # Avoid r = 0 singularity
         with np.errstate(divide="ignore", invalid="ignore"):
             phi_i = const * q[i] / r
+        # Where r == 0, set to NaN and handle later
         phi_i[~np.isfinite(phi_i)] = np.nan
         phi += phi_i
 
+    # Mask out very near points (inside r_min_factor * sigma)
     for i in range(n_q):
         dx = x - xq[i]
         dy = y - yq[i]
@@ -169,8 +195,11 @@ def analytic_phi_multi(x, y, z, xq, yq, zq, q, eps_r, r_min_factor, sigma):
 # ---------- Boundary conditions ----------
 
 def grounded_boundary(domain, V):
-    """φ = 0 on all boundaries (Dirichlet BC)."""
+    """
+    φ = 0 on all boundaries (Dirichlet BC).
+    """
     def on_boundary(x):
+        # All boundary facets: use mesh.locate_entities_boundary
         return np.full(x.shape[1], True, dtype=bool)
 
     boundary_facets = mesh.locate_entities_boundary(
@@ -218,8 +247,9 @@ def lineprobe_z_and_error(domain, phi, params):
     run_root = Path(params["run_root"])
     basename = params.get("basename", "multi_point_box")
 
-    # Use full mesh extents if z-range unspecified
+    # If z range not specified, use full box extents from mesh
     if z_min is None or z_max is None:
+        # Domain extents from mesh coordinates
         coords = domain.geometry.x
         z_min_mesh = np.min(coords[:, 2])
         z_max_mesh = np.max(coords[:, 2])
@@ -232,6 +262,7 @@ def lineprobe_z_and_error(domain, phi, params):
         print(f"[probe] line along z at (x,y)=({x_probe:g},{y_probe:g}), "
               f"z ∈ [{z_min:g}, {z_max:g}], npts={npts}")
 
+    # Build line points
     z_vals = np.linspace(z_min, z_max, npts)
     x_vals = np.full_like(z_vals, x_probe)
     y_vals = np.full_like(z_vals, y_probe)
@@ -242,6 +273,7 @@ def lineprobe_z_and_error(domain, phi, params):
     candidates = geometry.compute_collisions_points(bb, points)
     colliding_cells = geometry.compute_colliding_cells(domain, candidates, points)
 
+    # Collect points and cells that are actually in this process' part of the mesh
     points_on_proc = []
     cells = []
     idx_on_proc = []
@@ -259,6 +291,7 @@ def lineprobe_z_and_error(domain, phi, params):
 
     if points_on_proc.size > 0:
         values = phi.eval(points_on_proc, cells)
+        # values has shape (n_local, 1)
         values = values[:, 0]
         for local_i, global_i in enumerate(idx_on_proc):
             phi_num[global_i] = values[local_i]
@@ -268,6 +301,7 @@ def lineprobe_z_and_error(domain, phi, params):
         x_vals, y_vals, z_vals, xq, yq, zq, q, eps_r, r_min_factor, sigma
     )
 
+    # Errors
     abs_error = np.full(npts, np.nan, dtype=np.double)
     rel_error = np.full(npts, np.nan, dtype=np.double)
 
@@ -279,13 +313,16 @@ def lineprobe_z_and_error(domain, phi, params):
     abs_error[mask] = np.abs(phi_num[mask] - phi_analytic[mask])
     rel_error[mask] = abs_error[mask] / np.abs(phi_analytic[mask])
 
+    # Summary metrics (on rank 0, assuming serial run)
     if RANK == 0 and np.any(mask):
         max_rel = np.nanmax(rel_error[mask])
         rms_rel = np.sqrt(np.nanmean(rel_error[mask] ** 2))
         print(f"[error] max rel error (slice) ≈ {max_rel:.3e}")
         print(f"[error] RMS rel error (slice) ≈ {rms_rel:.3e}")
+        # Count how many points used
         print(f"[error] points used in error: {np.count_nonzero(mask)} / {npts}")
 
+    # Write CSV from rank 0
     if RANK == 0:
         csv_path = run_root / f"{basename}_lineprobe_z.csv"
         data = np.column_stack(
@@ -322,13 +359,11 @@ def solve_poisson_multi_point(params):
         print(f"{len(q)} charges, q={q}")
 
     domain = build_box(Lx, Ly, H, h)
-
-    # Scalar potential function space
-    V_phi = fem.functionspace(domain, ("CG", deg))
+    V_phi = fem.FunctionSpace(domain, ("CG", deg))
 
     # Permittivity (homogeneous)
     eps_val = eps_r * EPS0
-    eps = fem.Constant(domain, PETSc.ScalarType(eps_val))
+    eps = fem.Constant(domain, PETSC.ScalarType(eps_val))
 
     # Build RHS ρ
     rho = gaussian_rho_multi(V_phi, xq, yq, zq, q, sigma)
@@ -350,21 +385,32 @@ def solve_poisson_multi_point(params):
             "ksp_rtol": 1e-10,
             "ksp_atol": 1e-12,
         },
-        petsc_options_prefix="phi_",
     )
 
     phi_sol = problem.solve()
 
-    # ---- E = -∇φ as a vector CG field (for XDMF / ParaView) ----
-    dim = domain.geometry.dim
-    V_E = fem.functionspace(domain, ("CG", deg, (dim,)))
-    grad_phi = ufl.grad(phi_sol)
+    # Electric field E = -∇φ, projected into vector space
+    V_E = fem.VectorFunctionSpace(domain, ("CG", deg))
+    E_expr = -ufl.grad(phi_sol)
     E = fem.Function(V_E)
     E.name = "E"
-    E_expr = fem.Expression(-grad_phi, V_E.element.interpolation_points)
-    E.interpolate(E_expr)
 
-    # Output XDMF (mesh, phi, rho, E)
+    # L2 projection: (E, w) = (-∇φ, w)
+    w = ufl.TestFunction(V_E)
+    aE = ufl.inner(E, w) * ufl.dx
+    LE = ufl.inner(E_expr, w) * ufl.dx
+    prob_E = LinearProblem(
+        aE, LE, bcs=[],
+        petsc_options={
+            "ksp_type": "cg",
+            "pc_type": "jacobi",
+            "ksp_rtol": 1e-10,
+            "ksp_atol": 1e-12,
+        },
+    )
+    E = prob_E.solve()
+
+    # Output XDMF (numerical fields only)
     xdmf_path = run_root / f"{basename}.xdmf"
     with io.XDMFFile(COMM, xdmf_path.as_posix(), "w") as xdmf:
         xdmf.write_mesh(domain)
@@ -377,7 +423,7 @@ def solve_poisson_multi_point(params):
     if RANK == 0:
         print(f"[io] wrote XDMF to {xdmf_path}")
 
-    # 1D slice analytic vs numeric check (φ only)
+    # 1D slice analytic vs numeric check
     lineprobe_z_and_error(domain, phi_sol, params)
 
     return domain, V_phi, phi_sol, rho, V_E, E
@@ -487,3 +533,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
