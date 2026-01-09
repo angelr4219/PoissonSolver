@@ -2,45 +2,27 @@
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-*.egg-info/
+.venv/
+.env
+.ipynb_checkpoints/
 
-# macOS
+# OS/editor
 .DS_Store
-
-# Editors/IDE
 .vscode/
 .idea/
 
-# Results / large files
-results/
-results/**/*
-*.h5
-*.xdmf
-*.png
-*.csv
-
-# Docker
+# Logs
 *.log
-# OS/editor junk
-.DS_Store
-__pycache__/
-*.pyc
 
-# Build / results / logs
-results/*.xdmf
-results/*.h5
-results/*.csv
-results/*.png
-results/*.vtu
-results/*.pvsm
+# Common simulation outputs (edit to taste)
+out/
+outputs/
+results/
+tmp/
+
+# Mesh / viz data that can get big (edit if you DO want to track these)
 *.xdmf
 *.h5
 *.vtu
-*.pvsm
 *.vtk
-*.log
-
-# Docker & env
-.env
-*.ipynb_checkpoints/
+*.msh
