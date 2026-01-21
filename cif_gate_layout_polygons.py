@@ -175,6 +175,23 @@ def parse_gate_voltage_pairs(pairs: List[str]) -> Dict[str, float]:
     return out
 
 
+def parse_gate_ngon_pairs(pairs: List[str]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for s in pairs:
+        if "=" not in s:
+            raise ValueError(f"--gateN entries must be like Layer=N, got '{s}'")
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            raise ValueError(f"Bad --gateN key in '{s}'")
+        n = int(v)
+        if n < 3:
+            raise ValueError(f"Need N>=3 for polygons, got {n} for layer {k}")
+        out[k] = n
+    return out
+
+
 def _degree_compat(deg_or_callable) -> int:
     try:
         return int(deg_or_callable())
@@ -192,21 +209,99 @@ def normalize_outdir(outdir: str) -> str:
 
 @dataclass(frozen=True)
 class PhysTags:
-    Sige: int = 1
+    # volumes
+    SIGE: int = 1
+    CAP: int = 2
+    # outer boundary facets
     TOP_GROUND: int = 10
     BOTTOM: int = 11
     SIDES: int = 12
+    # gate facets start
     GATE0: int = 100
 
 
-def build_gmsh_3d_device_with_top_patch_gates(
+# ----------------------------
+# Polygon helpers
+# ----------------------------
+def regular_ngon_vertices(xc: float, yc: float, n: int, R: float, rot_deg: float = 0.0) -> np.ndarray:
+    th0 = np.deg2rad(rot_deg)
+    k = np.arange(n, dtype=float)
+    th = th0 + 2.0 * np.pi * k / n
+    x = xc + R * np.cos(th)
+    y = yc + R * np.sin(th)
+    return np.stack([x, y], axis=1)
+
+
+def point_in_polygon_2d(x: float, y: float, poly_xy: np.ndarray) -> bool:
+    n = poly_xy.shape[0]
+    inside = False
+    x0, y0 = poly_xy[-1, 0], poly_xy[-1, 1]
+    for i in range(n):
+        x1, y1 = poly_xy[i, 0], poly_xy[i, 1]
+        cond = ((y1 > y) != (y0 > y)) and (x < (x0 - x1) * (y - y1) / (y0 - y1 + 1e-300) + x1)
+        if cond:
+            inside = not inside
+        x0, y0 = x1, y1
+    return inside
+
+
+def _dist_point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    vx, vy = bx - ax, by - ay
+    wx, wy = px - ax, py - ay
+    vv = vx * vx + vy * vy
+    if vv <= 0.0:
+        return float(np.hypot(px - ax, py - ay))
+    t = (wx * vx + wy * vy) / vv
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    cx, cy = ax + t * vx, ay + t * vy
+    return float(np.hypot(px - cx, py - cy))
+
+
+def point_in_or_on_polygon_2d(x: float, y: float, poly_xy: np.ndarray, tol: float) -> bool:
+    if point_in_polygon_2d(x, y, poly_xy):
+        return True
+    # treat boundary as inside (important for vertical walls whose COM sits on an edge)
+    n = poly_xy.shape[0]
+    for i in range(n):
+        ax, ay = float(poly_xy[i, 0]), float(poly_xy[i, 1])
+        bx, by = float(poly_xy[(i + 1) % n, 0]), float(poly_xy[(i + 1) % n, 1])
+        if _dist_point_to_segment(x, y, ax, ay, bx, by) <= tol:
+            return True
+    return False
+
+
+def polygon_footprint_for_box(b: Box2D, n: int, shrink: float, rot_deg: float) -> np.ndarray:
+    R = 0.5 * shrink * min(b.W, b.H)
+    return regular_ngon_vertices(b.xc, b.yc, n=n, R=R, rot_deg=rot_deg)
+
+
+def occ_add_regular_ngon_surface_from_box(occ, b: Box2D, z: float, n: int, h: float, shrink: float, rot_deg: float) -> int:
+    poly = polygon_footprint_for_box(b, n=n, shrink=shrink, rot_deg=rot_deg)
+    pts = [occ.addPoint(float(x), float(y), float(z), float(h)) for (x, y) in poly]
+    lines = [occ.addLine(pts[i], pts[(i + 1) % n]) for i in range(n)]
+    loop = occ.addCurveLoop(lines)
+    surf = occ.addPlaneSurface([loop])
+    return surf
+
+
+# ----------------------------
+# Gmsh build + tags
+# ----------------------------
+def build_gmsh_3d_device(
     base: Box2D,
     gate_boxes: List[Box2D],
     z_top: float,
     Lz: float,
+    gate_mode: str,
+    Lcap: float,
+    gate_h: float,
     h: float,
     include_layers_regex: str,
-    model_name: str = "sige_top_patch_gates",
+    layer_to_ngon: Dict[str, int],
+    default_N: int,
+    poly_shrink: float,
+    poly_rot_deg: float,
+    model_name: str = "sige_polygons",
 ) -> Tuple[dmesh.Mesh, dmesh.MeshTags, dmesh.MeshTags, Dict[str, int], PhysTags, List[str]]:
     phys = PhysTags()
     gmsh.initialize()
@@ -220,70 +315,157 @@ def build_gmsh_3d_device_with_top_patch_gates(
 
         xmin, xmax = base.xmin, base.xmax
         ymin, ymax = base.ymin, base.ymax
-        zmin_dev, zmax_dev = z_top - Lz, z_top
-        dev = occ.addBox(xmin, ymin, zmin_dev, xmax - xmin, ymax - ymin, zmax_dev - zmin_dev)
+
+        zmin_sige, zmax_sige = z_top - Lz, z_top
+        sige = occ.addBox(xmin, ymin, zmin_sige, xmax - xmin, ymax - ymin, zmax_sige - zmin_sige)
+
+        cap = None
+        if gate_mode == "extruded":
+            if Lcap <= 0:
+                raise ValueError("For gate_mode=extruded, need Lcap>0")
+            if gate_h <= 0 or gate_h > Lcap:
+                raise ValueError("For gate_mode=extruded, need 0<gate_h<=Lcap")
+            cap = occ.addBox(xmin, ymin, z_top, xmax - xmin, ymax - ymin, Lcap)
+
         occ.synchronize()
 
         keep_re = re.compile(include_layers_regex) if include_layers_regex else None
         kept_gate_boxes = [b for b in gate_boxes if (keep_re is None or keep_re.search(b.layer))]
         kept_layer_names = _unique_in_order([b.layer for b in kept_gate_boxes])
 
-        gate_surfs: List[Tuple[int, int]] = []
-        for b in kept_gate_boxes:
-            dx = b.xmax - b.xmin
-            dy = b.ymax - b.ymin
-            if dx <= 0 or dy <= 0:
-                print(f"[WARN] Skipping degenerate box layer={b.layer} dx={dx} dy={dy}")
-                continue
-            s = occ.addRectangle(b.xmin, b.ymin, z_top, dx, dy)
-            gate_surfs.append((2, s))
-        occ.synchronize()
-
-        if gate_surfs:
-            occ.fragment([(3, dev)], gate_surfs)
-            occ.synchronize()
-
-        vols = gmsh.model.getEntities(dim=3)
-        vol_tags = [t for (d, t) in vols]
-        gmsh.model.addPhysicalGroup(3, vol_tags, phys.Sige)
-        gmsh.model.setPhysicalName(3, phys.Sige, "SiGe")
-
         layer_to_facet_tag: Dict[str, int] = {name: phys.GATE0 + i for i, name in enumerate(kept_layer_names)}
 
+        # Precompute polygon footprints (CIF units) for tagging
+        polys_by_layer: Dict[str, List[np.ndarray]] = {name: [] for name in kept_layer_names}
+        for b in kept_gate_boxes:
+            N = int(layer_to_ngon.get(b.layer, default_N))
+            if N < 3:
+                N = 3
+            polys_by_layer[b.layer].append(polygon_footprint_for_box(b, n=N, shrink=poly_shrink, rot_deg=poly_rot_deg))
+
+        # Create gates
+        if gate_mode == "patch":
+            gate_surfs: List[Tuple[int, int]] = []
+            for b in kept_gate_boxes:
+                N = int(layer_to_ngon.get(b.layer, default_N))
+                if N < 3:
+                    N = 3
+                s = occ_add_regular_ngon_surface_from_box(
+                    occ=occ, b=b, z=z_top, n=N, h=h, shrink=poly_shrink, rot_deg=poly_rot_deg
+                )
+                gate_surfs.append((2, s))
+            occ.synchronize()
+
+            if gate_surfs:
+                occ.fragment([(3, sige)], gate_surfs)
+                occ.synchronize()
+
+        elif gate_mode == "extruded":
+            assert cap is not None
+
+            # Build extruded prisms in the cap volume and CUT them out, so gate surfaces become boundary facets.
+            gate_prisms: List[Tuple[int, int]] = []
+            for b in kept_gate_boxes:
+                N = int(layer_to_ngon.get(b.layer, default_N))
+                if N < 3:
+                    N = 3
+                s = occ_add_regular_ngon_surface_from_box(
+                    occ=occ, b=b, z=z_top, n=N, h=h, shrink=poly_shrink, rot_deg=poly_rot_deg
+                )
+                # extrude surface in +z to make volume
+                ext = occ.extrude([(2, s)], 0.0, 0.0, gate_h)
+                # find the volume created by extrude
+                for (dim, tag) in ext:
+                    if dim == 3:
+                        gate_prisms.append((3, tag))
+            occ.synchronize()
+
+            # Cut prisms out of the cap volume
+            if gate_prisms:
+                cut_out, _ = occ.cut([(3, cap)], gate_prisms, removeObject=True, removeTool=True)
+                occ.synchronize()
+                if len(cut_out) != 1 or cut_out[0][0] != 3:
+                    raise RuntimeError(f"Unexpected cut result: {cut_out}")
+                cap = cut_out[0][1]
+
+            # Ensure conformity at the SiGe-cap interface
+            occ.fragment([(3, sige), (3, cap)], [])
+            occ.synchronize()
+
+        else:
+            raise ValueError(f"Unknown gate_mode={gate_mode}")
+
+        # Tag volumes
+        vols = gmsh.model.getEntities(dim=3)
+        sige_vols: List[int] = []
+        cap_vols: List[int] = []
+        for (dim, vtag) in vols:
+            cx, cy, cz = occ.getCenterOfMass(dim, vtag)
+            if cz < z_top - 1e-9:
+                sige_vols.append(vtag)
+            else:
+                cap_vols.append(vtag)
+
+        if sige_vols:
+            gmsh.model.addPhysicalGroup(3, sige_vols, phys.SIGE)
+            gmsh.model.setPhysicalName(3, phys.SIGE, "SiGe")
+        if cap_vols:
+            gmsh.model.addPhysicalGroup(3, cap_vols, phys.CAP)
+            gmsh.model.setPhysicalName(3, phys.CAP, "cap")
+
+        # Tag facets
         surfs = gmsh.model.getEntities(dim=2)
-        tol = 1e-9
-
-        def rect_contains(b: Box2D, x: float, y: float) -> bool:
-            return (x >= b.xmin - tol) and (x <= b.xmax + tol) and (y >= b.ymin - tol) and (y <= b.ymax + tol)
-
-        layer_surfs: Dict[str, List[int]] = {name: [] for name in kept_layer_names}
         top_ground: List[int] = []
         bottom: List[int] = []
         sides: List[int] = []
+        layer_surfs: Dict[str, List[int]] = {name: [] for name in kept_layer_names}
 
-        zmin = z_top - Lz
-        boxes_by_layer: Dict[str, List[Box2D]] = {name: [] for name in kept_layer_names}
-        for b in kept_gate_boxes:
-            boxes_by_layer[b.layer].append(b)
+        z_bot = z_top - Lz
+        z_top_outer = z_top if gate_mode == "patch" else (z_top + Lcap)
 
-        for (dim, s) in surfs:
-            cx, cy, cz = occ.getCenterOfMass(dim, s)
-            if abs(cz - z_top) < 1e-6:
+        # Choose a tolerance based on typical polygon size
+        if kept_gate_boxes:
+            Lref = max(max(b.W for b in kept_gate_boxes), max(b.H for b in kept_gate_boxes))
+        else:
+            Lref = 1.0
+        tol_xy = 1e-6 * max(Lref, 1.0)
+        tol_z = 1e-6 * max(Lref, 1.0)
+
+        for (dim, stag) in surfs:
+            cx, cy, cz = occ.getCenterOfMass(dim, stag)
+
+            # Outer boundaries
+            if abs(cz - z_bot) < tol_z:
+                bottom.append(stag)
+                continue
+            if abs(cz - z_top_outer) < tol_z:
+                # outer top only, not gates (gates are at z_top or inside the cap)
+                top_ground.append(stag)
+                continue
+
+            # Gate surfaces:
+            # patch mode: gates live on z=z_top
+            # extruded mode: gates include surfaces with cz in [z_top, z_top+gate_h]
+            if gate_mode == "patch":
+                in_gate_z = abs(cz - z_top) < tol_z
+            else:
+                in_gate_z = (cz >= z_top - tol_z) and (cz <= (z_top + gate_h + tol_z))
+
+            if in_gate_z:
                 assigned = False
                 for name in kept_layer_names:
-                    for b in boxes_by_layer[name]:
-                        if rect_contains(b, cx, cy):
-                            layer_surfs[name].append(s)
+                    for poly in polys_by_layer[name]:
+                        if point_in_or_on_polygon_2d(cx, cy, poly, tol=tol_xy):
+                            layer_surfs[name].append(stag)
                             assigned = True
                             break
                     if assigned:
                         break
-                if not assigned:
-                    top_ground.append(s)
-            elif abs(cz - zmin) < 1e-6:
-                bottom.append(s)
-            else:
-                sides.append(s)
+                if assigned:
+                    continue
+
+            # Everything else is a side boundary (including cap sides)
+            sides.append(stag)
 
         if top_ground:
             gmsh.model.addPhysicalGroup(2, top_ground, phys.TOP_GROUND)
@@ -298,7 +480,7 @@ def build_gmsh_3d_device_with_top_patch_gates(
         for name in kept_layer_names:
             ss = layer_surfs[name]
             if not ss:
-                print(f"[WARN] Layer '{name}' got 0 top facets.")
+                print(f"[WARN] Layer '{name}' got 0 gate facets.")
                 continue
             tag = layer_to_facet_tag[name]
             gmsh.model.addPhysicalGroup(2, ss, tag)
@@ -311,10 +493,10 @@ def build_gmsh_3d_device_with_top_patch_gates(
     out = gmshio.model_to_mesh(gmsh.model, COMM, rank=0, gdim=3)
     msh, ct, ft = out[0], out[1], out[2]
 
-    phys = PhysTags()
     if RANK != 0:
         kept_layer_names = None
     kept_layer_names = COMM.bcast(kept_layer_names, root=0)
+
     layer_to_facet_tag = {name: phys.GATE0 + i for i, name in enumerate(kept_layer_names)}
 
     gmsh.finalize()
@@ -406,206 +588,8 @@ def function_for_xdmf(phi: fem.Function, msh: dmesh.Mesh) -> fem.Function:
     return phi_out
 
 
-def _mesh_counts_global(msh: dmesh.Mesh) -> Dict[str, int]:
-    tdim = msh.topology.dim
-    msh.topology.create_connectivity(tdim, 0)
-    msh.topology.create_connectivity(tdim, tdim)
-    cell_imap = msh.topology.index_map(tdim)
-    v_imap = msh.topology.index_map(0)
-    ncell = COMM.allreduce(int(cell_imap.size_local), op=MPI.SUM)
-    nvert = COMM.allreduce(int(v_imap.size_local), op=MPI.SUM)
-    return {"num_cells": ncell, "num_vertices": nvert}
-
-
-def _print_full_device_report(
-    args: argparse.Namespace,
-    base: Box2D,
-    kept_gate_boxes: List[Box2D],
-    layer_to_facet_tag: Dict[str, int],
-    gate_voltages: Dict[str, float],
-    z_top: float,
-    Lz: float,
-    phys: PhysTags,
-    outfiles: Dict[str, str],
-    msh: dmesh.Mesh,
-) -> None:
-    if RANK != 0:
-        return
-
-    # Base extents (CIF units)
-    x0, x1 = base.xmin, base.xmax
-    y0, y1 = base.ymin, base.ymax
-    z0, z1 = z_top - Lz, z_top
-
-    s = float(args.scale)
-    # Scaled extents
-    xs0, xs1 = x0 * s, x1 * s
-    ys0, ys1 = y0 * s, y1 * s
-    zs0, zs1 = z0 * s, z1 * s
-
-    # Print all args (including defaults)
-    items = sorted(vars(args).items(), key=lambda kv: kv[0])
-
-    print("\n==============================")
-    print("=== FULL DEVICE SPEC REPORT ===")
-    print("==============================")
-
-    print("\n--- Inputs (all argparse values) ---")
-    for k, v in items:
-        print(f"{k}: {v}")
-
-    print("\n--- Device region (SiGe box) ---")
-    print(f"Base layer: {base.layer}")
-    print(f"W={base.W}, H={base.H}, center=(xc={base.xc}, yc={base.yc})  [CIF units]")
-    print(f"x in [{x0}, {x1}]  [CIF units]")
-    print(f"y in [{y0}, {y1}]  [CIF units]")
-    print(f"z in [{z0}, {z1}]  [CIF units]   (z_top={z_top}, Lz={Lz})")
-
-    print("\n--- Device region (SiGe box, scaled coords) ---")
-    print(f"scale = {s}")
-    print(f"x in [{xs0}, {xs1}]  [scaled]")
-    print(f"y in [{ys0}, {ys1}]  [scaled]")
-    print(f"z in [{zs0}, {zs1}]  [scaled]")
-
-    print("\n--- Physics ---")
-    print("PDE: -div(eps * grad(phi)) = rho")
-    print(f"eps_r = {args.eps_r}")
-    print(f"rho   = {args.rho}")
-    print("Dirichlet BCs:")
-    print("  top_ground = 0 V")
-    print(f"  sides      = {args.bc_sides}")
-    print(f"  bottom     = {args.bc_bottom}")
-    print("Gate BCs:")
-    print(f"  default_gateV = {args.default_gateV}")
-
-    print("\n--- Gates included (after include_layers_regex filter) ---")
-    if not kept_gate_boxes:
-        print("(none)")
-    else:
-        # stable ordering like in CIF, but only kept gates
-        for b in kept_gate_boxes:
-            Vg = float(gate_voltages.get(b.layer, args.default_gateV))
-            tag = layer_to_facet_tag.get(b.layer, None)
-            print(f"Layer {b.layer}: tag={tag}, V={Vg}")
-            print(f"  W={b.W}, H={b.H}, center=(xc={b.xc}, yc={b.yc})  [CIF]")
-            print(f"  x in [{b.xmin}, {b.xmax}]  [CIF]")
-            print(f"  y in [{b.ymin}, {b.ymax}]  [CIF]")
-            print(f"  x in [{b.xmin*s}, {b.xmax*s}]  [scaled]")
-            print(f"  y in [{b.ymin*s}, {b.ymax*s}]  [scaled]")
-
-    print("\n--- Tag IDs used ---")
-    print(f"Cell tag: SiGe = {phys.Sige}")
-    print(f"Facet tags: TOP_GROUND={phys.TOP_GROUND}, BOTTOM={phys.BOTTOM}, SIDES={phys.SIDES}")
-    print(f"Gate facet tags start at GATE0={phys.GATE0} and increase per kept layer")
-
-    print("\n--- Mesh counts (global) ---")
-    counts = _mesh_counts_global(msh)
-    for k, v in counts.items():
-        print(f"{k}: {v}")
-
-    print("\n--- Output files ---")
-    for k in sorted(outfiles.keys()):
-        print(f"{k}: {outfiles[k]}")
-
-    print("\n--- Notes ---")
-    print("If rho=0 and all gates and boundaries are at 0 V, phi will be identically 0.")
-    print("==============================\n")
-
-
-def write_top_view_gate_fields(
-    msh: dmesh.Mesh,
-    ft: dmesh.MeshTags,
-    kept_gate_boxes_scaled: List[Box2D],
-    kept_layer_names: List[str],
-    layer_to_facet_tag: Dict[str, int],
-    gate_voltages: Dict[str, float],
-    default_gateV: float,
-    z_top_scaled: float,
-    phys: PhysTags,
-    out_xdmf_gateid: str,
-    out_xdmf_gateV: str,
-) -> None:
-    fdim = msh.topology.dim - 1
-
-    top_facets_list = []
-    for name in kept_layer_names:
-        tag = layer_to_facet_tag[name]
-        a = ft.find(tag)
-        if a.size > 0:
-            top_facets_list.append(a)
-    a = ft.find(phys.TOP_GROUND)
-    if a.size > 0:
-        top_facets_list.append(a)
-
-    if not top_facets_list:
-        if RANK == 0:
-            print("[WARN] No top facets found for top-view output.")
-        return
-
-    top_facets = np.unique(np.concatenate(top_facets_list).astype(np.int32))
-    smesh = dmesh.create_submesh(msh, fdim, top_facets)[0]
-
-    tdim = smesh.topology.dim
-    smesh.topology.create_connectivity(tdim, 0)
-    c2v = smesh.topology.connectivity(tdim, 0)
-
-    V0 = fem.functionspace(smesh, ("DG", 0))
-    gate_id = fem.Function(V0, name="gate_id")
-    gateV = fem.Function(V0, name="gateV")
-
-    im = smesh.topology.index_map(tdim)
-    ncells_local = im.size_local
-
-    if kept_gate_boxes_scaled:
-        Lref = max(
-            max(b.xmax - b.xmin for b in kept_gate_boxes_scaled),
-            max(b.ymax - b.ymin for b in kept_gate_boxes_scaled),
-        )
-    else:
-        Lref = 1.0
-    tol = 1e-12 * max(Lref, 1.0)
-
-    coords = smesh.geometry.x
-    vals_id = np.zeros(ncells_local, dtype=gate_id.x.array.dtype)
-    vals_V = np.zeros(ncells_local, dtype=gateV.x.array.dtype)
-
-    for cell in range(ncells_local):
-        vs = c2v.links(cell)
-        xc = coords[vs].mean(axis=0)
-        x, y, z = float(xc[0]), float(xc[1]), float(xc[2])
-
-        if abs(z - z_top_scaled) > 1e-6 * max(Lref, 1.0):
-            vals_id[cell] = 0
-            vals_V[cell] = 0.0
-            continue
-
-        tag_here = 0
-        V_here = 0.0
-        for b in kept_gate_boxes_scaled:
-            if (x >= b.xmin - tol) and (x <= b.xmax + tol) and (y >= b.ymin - tol) and (y <= b.ymax + tol):
-                tag_here = layer_to_facet_tag[b.layer]
-                V_here = float(gate_voltages.get(b.layer, default_gateV))
-        vals_id[cell] = tag_here
-        vals_V[cell] = V_here
-
-    gate_id.x.array[:ncells_local] = vals_id
-    gateV.x.array[:ncells_local] = vals_V
-
-    with io.XDMFFile(COMM, out_xdmf_gateid, "w") as xdmf:
-        xdmf.write_mesh(smesh)
-        xdmf.write_function(gate_id)
-
-    with io.XDMFFile(COMM, out_xdmf_gateV, "w") as xdmf:
-        xdmf.write_mesh(smesh)
-        xdmf.write_function(gateV)
-
-    if RANK == 0:
-        print(f"[INFO] Wrote top-view gate_id: {out_xdmf_gateid}")
-        print(f"[INFO] Wrote top-view gateV:   {out_xdmf_gateV}")
-
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="CIF gate layout as top-surface Dirichlet patches.")
+    ap = argparse.ArgumentParser(description="CIF gate layout as Dirichlet polygon gates, with optional extrusion.")
     ap.add_argument("--cif", type=str, default="", help="Path to CIF-like file. If empty, uses built-in example.")
     ap.add_argument("--outdir", type=str, default="Results/cif_demo", help="Output directory.")
     ap.add_argument("--basename", type=str, default="sige_gate_layout", help="Basename for outputs.")
@@ -620,10 +604,26 @@ def main() -> None:
 
     ap.add_argument("--include_layers_regex", type=str, default=".*",
                     help="Regex for which CIF layers become gates (default: all non-base).")
+
     ap.add_argument("--gateV", type=str, nargs="*", default=[],
                     help="Gate voltages as Layer=V (repeatable). Example: --gateV A1=0.1 B0=-0.2")
     ap.add_argument("--default_gateV", type=float, default=0.0,
                     help="Default gate voltage if a layer is not listed in --gateV.")
+
+    ap.add_argument("--gateN", type=str, nargs="*", default=[],
+                    help="Polygon sides per layer as Layer=N (repeatable). Example: --gateN A1=5 B0=3")
+    ap.add_argument("--default_N", type=int, default=4, help="Default polygon sides for layers not in --gateN.")
+    ap.add_argument("--poly_shrink", type=float, default=0.95,
+                    help="Shrink factor <1 to keep polygon inside the CIF rectangle footprint.")
+    ap.add_argument("--poly_rot_deg", type=float, default=0.0,
+                    help="Rotate each regular polygon by this angle (degrees).")
+
+    ap.add_argument("--gate_mode", choices=["patch", "extruded"], default="patch",
+                    help="patch: polygon patches on z_top. extruded: cut extruded polygon prisms out of a cap volume.")
+    ap.add_argument("--Lcap", type=float, default=120.0,
+                    help="Cap thickness above z_top (CIF units). Used only for gate_mode=extruded.")
+    ap.add_argument("--gate_h", type=float, default=60.0,
+                    help="Extruded gate height (CIF units, <= Lcap). Used only for gate_mode=extruded.")
 
     ap.add_argument("--eps_r", type=float, default=11.7, help="Uniform relative permittivity (placeholder).")
     ap.add_argument("--rho", type=float, default=0.0, help="Uniform charge density (placeholder).")
@@ -655,46 +655,27 @@ def main() -> None:
 
     gate_boxes = [b for b in boxes if b.layer.lower() != "base"]
 
-    keep_re = re.compile(args.include_layers_regex) if args.include_layers_regex else None
-    kept_gate_boxes = [b for b in gate_boxes if (keep_re is None or keep_re.search(b.layer))]
-
     gate_voltages = parse_gate_voltage_pairs(args.gateV)
+    layer_to_ngon = parse_gate_ngon_pairs(args.gateN)
 
-    if RANK == 0:
-        print("\n=== Build params (Gmsh in CIF units) ===")
-        print(f"SiGe: z in [{args.z_top-args.Lz:.6g}, {args.z_top:.6g}]  (CIF units)")
-        print(f"h={args.h:.6g} (CIF units), deg(solve)={args.deg}")
-        print(f"include_layers_regex='{args.include_layers_regex}'")
-        print(f"bc: top ground=0, sides={args.bc_sides}, bottom={args.bc_bottom}")
-        print(f"eps_r={args.eps_r:g}, rho={args.rho:g}")
-        print(f"post-mesh coordinate scale = {args.scale:g}")
-        print(f"OUTDIR (host-mounted) = {args.outdir}")
-        if gate_voltages:
-            print("gateV overrides:")
-            for k in sorted(gate_voltages.keys()):
-                print(f"  {k} = {gate_voltages[k]:.6g}")
-        print(f"default_gateV = {args.default_gateV:.6g}")
-
-    msh, ct, ft, layer_to_facet_tag, phys, kept_layer_names = build_gmsh_3d_device_with_top_patch_gates(
+    msh, ct, ft, layer_to_facet_tag, phys, kept_layer_names = build_gmsh_3d_device(
         base=base,
         gate_boxes=gate_boxes,
         z_top=args.z_top,
         Lz=args.Lz,
+        gate_mode=args.gate_mode,
+        Lcap=args.Lcap,
+        gate_h=args.gate_h,
         h=args.h,
         include_layers_regex=args.include_layers_regex,
-        model_name="sige_top_patch_gates",
+        layer_to_ngon=layer_to_ngon,
+        default_N=args.default_N,
+        poly_shrink=args.poly_shrink,
+        poly_rot_deg=args.poly_rot_deg,
     )
 
-    # Apply coordinate scaling after mesh creation
     if args.scale != 1.0:
         msh.geometry.x[:] *= args.scale
-
-    # Scaled gate boxes for top-view output
-    kept_gate_boxes_scaled = [
-        Box2D(b.layer, b.W * args.scale, b.H * args.scale, b.xc * args.scale, b.yc * args.scale)
-        for b in kept_gate_boxes
-    ]
-    z_top_scaled = args.z_top * args.scale
 
     phi = solve_poisson_with_gate_dirichlet(
         msh=msh,
@@ -715,21 +696,15 @@ def main() -> None:
     gmin = COMM.allreduce(local_min, op=MPI.MIN)
     gmax = COMM.allreduce(local_max, op=MPI.MAX)
 
-    mesh_deg = _degree_compat(msh.geometry.cmap.degree)
-    sol_deg = _degree_compat(phi.function_space.ufl_element().degree)
-
     if RANK == 0:
         print("\n=== Solve summary ===")
         print(f"phi min/max = [{gmin:.6e}, {gmax:.6e}]")
-        if sol_deg != mesh_deg:
-            print(f"[INFO] XDMF requires degree match: mesh degree={mesh_deg}, phi degree={sol_deg}. Writing interpolated CG{mesh_deg}.")
 
     os.makedirs(args.outdir, exist_ok=True)
 
     xdmf_solution = os.path.join(args.outdir, f"{args.basename}_phi.xdmf")
     xdmf_facets = os.path.join(args.outdir, f"{args.basename}_facet_tags.xdmf")
-    xdmf_top_id = os.path.join(args.outdir, f"{args.basename}_top_view_gate_id.xdmf")
-    xdmf_top_V = os.path.join(args.outdir, f"{args.basename}_top_view_gateV.xdmf")
+    xdmf_cells = os.path.join(args.outdir, f"{args.basename}_cell_tags.xdmf")
 
     phi_write = function_for_xdmf(phi, msh)
 
@@ -741,48 +716,15 @@ def main() -> None:
         xdmf.write_mesh(msh)
         write_meshtags_compat(xdmf, ft, msh)
 
-    write_top_view_gate_fields(
-        msh=msh,
-        ft=ft,
-        kept_gate_boxes_scaled=kept_gate_boxes_scaled,
-        kept_layer_names=kept_layer_names,
-        layer_to_facet_tag=layer_to_facet_tag,
-        gate_voltages=gate_voltages,
-        default_gateV=args.default_gateV,
-        z_top_scaled=z_top_scaled,
-        phys=phys,
-        out_xdmf_gateid=xdmf_top_id,
-        out_xdmf_gateV=xdmf_top_V,
-    )
-
-    outfiles = {
-        "phi_solution": xdmf_solution,
-        "facet_tags": xdmf_facets,
-        "top_view_gate_id": xdmf_top_id,
-        "top_view_gateV": xdmf_top_V,
-    }
-
-    # Print the full report at end (includes input, geometry, voltages, outputs)
-    _print_full_device_report(
-        args=args,
-        base=base,
-        kept_gate_boxes=kept_gate_boxes,
-        layer_to_facet_tag=layer_to_facet_tag,
-        gate_voltages=gate_voltages,
-        z_top=args.z_top,
-        Lz=args.Lz,
-        phys=phys,
-        outfiles=outfiles,
-        msh=msh,
-    )
+    with io.XDMFFile(COMM, xdmf_cells, "w") as xdmf:
+        xdmf.write_mesh(msh)
+        write_meshtags_compat(xdmf, ct, msh)
 
     if RANK == 0:
-        print("ParaView:")
-        print("  - Open *_top_view_gateV.xdmf and color by gateV (easiest visual sanity check)")
-        print("  - Open *_top_view_gate_id.xdmf and color by gate_id (integer tags)")
-        print("  - Open *_phi.xdmf and color by phi")
-        print("  - Open *_facet_tags.xdmf and color by 'gmsh:physical' to see gate patches")
-
+        print("\nParaView:")
+        print("  - Open *_phi.xdmf and view phi")
+        print("  - Open *_facet_tags.xdmf and color by 'gmsh:physical' (gates should be vertical walls in extruded mode)")
+        print("  - Open *_cell_tags.xdmf and color by 'gmsh:physical' (SiGe vs cap)")
 
 if __name__ == "__main__":
     main()
