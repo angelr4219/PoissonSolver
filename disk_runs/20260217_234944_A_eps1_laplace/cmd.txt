@@ -1,0 +1,6 @@
+timestamp: 20260217_234944
+label: A_eps1_laplace
+cwd: /Users/angelramirez/Desktop/poisson_solver
+script: disk_gate_poisson.py
+docker_image: dolfinx/dolfinx:stable
+command: docker run --rm -it -v /Users/angelramirez/Desktop/poisson_solver:/app -w /app dolfinx/dolfinx:stable python3 -u disk_gate_poisson.py --eps_uniform 1.0 --rho0 0.0
