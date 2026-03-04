@@ -1,251 +1,279 @@
-from __future__ import annotations
-
+#!/usr/bin/env python3
 import argparse
 import math
-from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from mpi4py import MPI
-from petsc4py import PETSc
 
 import gmsh
-import ufl
-from dolfinx import fem, io
-from dolfinx.io import gmshio, VTXWriter
+from dolfinx import fem, io, mesh
+from dolfinx.io import gmshio
 from dolfinx.fem.petsc import LinearProblem
+import ufl
+from petsc4py import PETSc
 
 
-EPS0 = 8.8541878128e-12  # F/m
-
-
-@dataclass
-class PhysTags:
-    box_vol: int = 1
-    disk_vol: int = 2
-    outer_bnd: int = 11
-
-
-def model_to_mesh_robust(model, comm, rank: int, gdim: int = 3):
-    out = gmshio.model_to_mesh(model, comm, rank=rank, gdim=gdim)
-    if isinstance(out, (tuple, list)):
-        if len(out) < 3:
-            raise RuntimeError(f"gmshio.model_to_mesh returned {len(out)} items, expected at least 3")
-        return out[0], out[1], out[2]
-    raise RuntimeError("Unexpected gmshio.model_to_mesh return type")
-
-
-def build_gmsh_box_with_thin_disk_scaled(
-    Lx: float, Ly: float, Lz: float,
-    R: float, t: float, z0: float,
-    h_box: float, h_disk: float,
-    phys: PhysTags,
+def gmsh_build_box_with_refinement_field(
     comm: MPI.Comm,
-    gmsh_scale: float,
+    Lx: float, Ly: float, Lz: float,
+    R: float,
+    z0: float,
+    n_diam: int,
+    refine_band_R: float,
+    far_h_factor: float,
+    msh_path: Path,
 ):
     if comm.rank != 0:
-        return
-
-    s = gmsh_scale
-    Lx_s, Ly_s, Lz_s = Lx * s, Ly * s, Lz * s
-    R_s, t_s, z0_s = R * s, t * s, z0 * s
-    h_box_s, h_disk_s = h_box * s, h_disk * s
+        return None
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 1)
-    gmsh.model.add("charged_disk_box_scaled")
+    gmsh.model.add("charged_disk_box")
     occ = gmsh.model.occ
 
-    x0 = -Lx_s / 2.0
-    y0 = -Ly_s / 2.0
-    zmin = -Lz_s / 2.0
-    zmax = +Lz_s / 2.0
+    # Box centered at origin
+    x0 = -0.5 * Lx
+    y0 = -0.5 * Ly
+    zmin = -0.5 * Lz
+    box = occ.addBox(x0, y0, zmin, Lx, Ly, Lz)
 
-    box = occ.addBox(x0, y0, zmin, Lx_s, Ly_s, Lz_s)
-    disk = occ.addCylinder(0.0, 0.0, z0_s - t_s / 2.0, 0.0, 0.0, t_s, R_s)
+    # Helper disk surface for sizing field (no boolean ops)
+    c = occ.addCircle(0.0, 0.0, z0, R)
+    cl = occ.addCurveLoop([c])
+    disk_surf = occ.addPlaneSurface([cl])
+
     occ.synchronize()
 
-    occ.fragment([(3, box)], [(3, disk)])
-    occ.synchronize()
+    # Physical group for volume (stable id = 1)
+    pg_bulk = 1
+    gmsh.model.addPhysicalGroup(3, [box], pg_bulk)
+    gmsh.model.setPhysicalName(3, pg_bulk, "bulk")
 
-    occ.removeAllDuplicates()
-    occ.synchronize()
+    # Mesh sizing
+    h_disk = (2.0 * R) / float(n_diam)
+    h_far = far_h_factor * h_disk
 
-    vols = gmsh.model.getEntities(dim=3)
-    if len(vols) < 2:
-        raise RuntimeError(f"Expected >=2 volumes after fragment, got {len(vols)}")
+    # Distance-based size field
+    f_dist = gmsh.model.mesh.field.add("Distance")
+    gmsh.model.mesh.field.setNumbers(f_dist, "FacesList", [disk_surf])
 
-    def bbox(ent):
-        return gmsh.model.getBoundingBox(ent[0], ent[1])
+    f_thresh = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(f_thresh, "InField", f_dist)
+    gmsh.model.mesh.field.setNumber(f_thresh, "SizeMin", h_disk)
+    gmsh.model.mesh.field.setNumber(f_thresh, "SizeMax", h_far)
+    gmsh.model.mesh.field.setNumber(f_thresh, "DistMin", 0.0)
+    gmsh.model.mesh.field.setNumber(f_thresh, "DistMax", refine_band_R * R)
+    gmsh.model.mesh.field.setAsBackgroundMesh(f_thresh)
 
-    disk_vol = None
-    tol = 1e-6
-    for v in vols:
-        bb = bbox(v)
-        dx, dy, dz = (bb[3]-bb[0]), (bb[4]-bb[1]), (bb[5]-bb[2])
-        if abs(dz - t_s) < tol and dx <= 2.2 * R_s and dy <= 2.2 * R_s:
-            cx, cy, cz = 0.5*(bb[0]+bb[3]), 0.5*(bb[1]+bb[4]), 0.5*(bb[2]+bb[5])
-            if abs(cx) < tol and abs(cy) < tol and abs(cz - z0_s) < tol:
-                disk_vol = v
-                break
-    if disk_vol is None:
-        candidates = []
-        for v in vols:
-            bb = bbox(v)
-            candidates.append(((bb[3]-bb[0])*(bb[4]-bb[1])*(bb[5]-bb[2]), v))
-        candidates.sort(key=lambda x: x[0])
-        disk_vol = candidates[0][1]
-
-    box_vols = [v for v in vols if v != disk_vol]
-
-    gmsh.model.addPhysicalGroup(3, [disk_vol[1]], phys.disk_vol)
-    gmsh.model.setPhysicalName(3, phys.disk_vol, "disk_volume")
-    gmsh.model.addPhysicalGroup(3, [v[1] for v in box_vols], phys.box_vol)
-    gmsh.model.setPhysicalName(3, phys.box_vol, "box_volume")
-
-    surfs = gmsh.model.getEntities(dim=2)
-    outer = []
-    for srf in surfs:
-        bb = bbox(srf)
-        if (abs(bb[0]-x0) < tol and abs(bb[3]-x0) < tol) or \
-           (abs(bb[0]-(x0+Lx_s)) < tol and abs(bb[3]-(x0+Lx_s)) < tol) or \
-           (abs(bb[1]-y0) < tol and abs(bb[4]-y0) < tol) or \
-           (abs(bb[1]-(y0+Ly_s)) < tol and abs(bb[4]-(y0+Ly_s)) < tol) or \
-           (abs(bb[2]-zmin) < tol and abs(bb[5]-zmin) < tol) or \
-           (abs(bb[2]-zmax) < tol and abs(bb[5]-zmax) < tol):
-            outer.append(srf[1])
-    outer = sorted(set(outer))
-    if not outer:
-        raise RuntimeError("Failed to identify outer boundary surfaces.")
-
-    gmsh.model.addPhysicalGroup(2, outer, phys.outer_bnd)
-    gmsh.model.setPhysicalName(2, phys.outer_bnd, "outer_boundary")
-
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min(h_disk_s, h_box_s))
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", max(h_disk_s, h_box_s))
-
-    disk_surfs = gmsh.model.getBoundary([disk_vol], oriented=False, recursive=False)
-    disk_surfs = [e[1] for e in disk_surfs if e[0] == 2]
-    if disk_surfs:
-        fdist = gmsh.model.mesh.field.add("Distance")
-        gmsh.model.mesh.field.setNumbers(fdist, "FacesList", disk_surfs)
-        fthr = gmsh.model.mesh.field.add("Threshold")
-        gmsh.model.mesh.field.setNumber(fthr, "InField", fdist)
-        gmsh.model.mesh.field.setNumber(fthr, "SizeMin", h_disk_s)
-        gmsh.model.mesh.field.setNumber(fthr, "SizeMax", h_box_s)
-        gmsh.model.mesh.field.setNumber(fthr, "DistMin", 0.5 * R_s)
-        gmsh.model.mesh.field.setNumber(fthr, "DistMax", 2.0 * R_s)
-        gmsh.model.mesh.field.setAsBackgroundMesh(fthr)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.5 * h_disk)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h_far)
 
     gmsh.model.mesh.generate(3)
-    gmsh.model.mesh.optimize("Netgen")
+
+    msh_path.parent.mkdir(parents=True, exist_ok=True)
+    gmsh.write(str(msh_path))
+    gmsh.finalize()
+
+    return dict(h_disk=h_disk, h_far=h_far)
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--Lx", type=float, default=600e-9)
-    p.add_argument("--Ly", type=float, default=600e-9)
-    p.add_argument("--Lz", type=float, default=400e-9)
-    p.add_argument("--R", type=float, default=80e-9)
-    p.add_argument("--t", type=float, default=4e-9)
-    p.add_argument("--z0", type=float, default=0.0)
-    p.add_argument("--eps_r", type=float, default=11.7)
-    p.add_argument("--Q", type=float, default=1.602176634e-19)
-    p.add_argument("--sigma", type=float, default=None)
-    p.add_argument("--h_box", type=float, default=20e-9)
-    p.add_argument("--h_disk", type=float, default=6e-9)
-    p.add_argument("--degree", type=int, default=2)
-    p.add_argument("--gmsh_scale", type=float, default=1e9)
-    p.add_argument("--out", type=str, default="out_disk")
-    args = p.parse_args()
+def build_cellwise_fields(
+    msh,
+    R: float, t: float, Q: float,
+    z0: float,
+    epsr_bulk: float,
+):
+    """
+    Create DG0 (cellwise) fields:
+      - rho (C/m^3): disk region gets rho_disk, else 0
+      - epsilon (F/m): bulk epsilon everywhere for now
+      - region_id (int-like): 1 everywhere for now
+    """
+    eps0 = 8.8541878128e-12
+    eps_bulk = eps0 * epsr_bulk
 
-    comm = MPI.COMM_WORLD
-    rank = comm.rank
-    phys = PhysTags()
+    Q0 = fem.functionspace(msh, ("DG", 0))
 
-    build_gmsh_box_with_thin_disk_scaled(
-        Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
-        R=args.R, t=args.t, z0=args.z0,
-        h_box=args.h_box, h_disk=args.h_disk,
-        phys=phys, comm=comm, gmsh_scale=args.gmsh_scale,
+    rho = fem.Function(Q0)
+    rho.name = "rho"
+    rho.x.array[:] = 0.0
+
+    epsilon = fem.Function(Q0)
+    epsilon.name = "epsilon"
+    epsilon.x.array[:] = eps_bulk
+
+    region_id = fem.Function(Q0)
+    region_id.name = "region_id"
+    region_id.x.array[:] = 1.0  # store as float for XDMF; ParaView still treats it fine
+
+    # Disk indicator using DG0 dof coords (cell midpoints)
+    x = Q0.tabulate_dof_coordinates().reshape((-1, 3))
+    r2 = x[:, 0]**2 + x[:, 1]**2
+    inside = (r2 <= R * R) & (np.abs(x[:, 2] - z0) <= 0.5 * t)
+
+    rho_disk = Q / (math.pi * R * R * t)
+    rho.x.array[inside] = rho_disk
+
+    return rho, epsilon, region_id, inside, rho_disk
+
+
+def solve_and_write_all_fields(
+    comm: MPI.Comm,
+    msh_path: Path,
+    outdir: Path,
+    R: float, t: float, Q: float,
+    z0: float,
+    epsr_bulk: float,
+    p_solve: int,
+    write_gate_scaffold: bool,
+):
+    msh, cell_tags, facet_tags = gmshio.read_from_msh(str(msh_path), comm, gdim=3)
+
+    # Cellwise fields
+    rho, epsilon, region_id, inside, rho_disk = build_cellwise_fields(
+        msh=msh, R=R, t=t, Q=Q, z0=z0, epsr_bulk=epsr_bulk
     )
 
-    if rank == 0:
-        msh, ct, ft = model_to_mesh_robust(gmsh.model, comm, rank=0, gdim=3)
-        gmsh.finalize()
-    else:
-        msh, ct, ft = model_to_mesh_robust(None, comm, rank=0, gdim=3)
+    # Solve in degree p_solve
+    Vp = fem.functionspace(msh, ("CG", p_solve))
+    u = ufl.TrialFunction(Vp)
+    v = ufl.TestFunction(Vp)
 
-    msh.geometry.x[:] /= args.gmsh_scale
+    # Outer boundary phi=0
+    fdim = msh.topology.dim - 1
+    boundary_facets = mesh.locate_entities_boundary(
+        msh, fdim, lambda X: np.full(X.shape[1], True, dtype=bool)
+    )
+    bc_dofs = fem.locate_dofs_topological(Vp, fdim, boundary_facets)
+    bc = fem.dirichletbc(PETSc.ScalarType(0.0), bc_dofs, Vp)
 
-    V = fem.functionspace(msh, ("CG", args.degree))
-    u = ufl.TrialFunction(V)
-    v = ufl.TestFunction(V)
-
-    eps = fem.Constant(msh, PETSc.ScalarType(args.eps_r * EPS0))
-
-    area = math.pi * args.R**2
-    Q = args.Q if args.sigma is None else args.sigma * area
-    vol = area * args.t
-    rho_disk = Q / vol
-
-    W0 = fem.functionspace(msh, ("DG", 0))
-    rho = fem.Function(W0)
-    rho.x.array[:] = 0.0
-    disk_cells = ct.find(phys.disk_vol)
-    rho.x.array[disk_cells] = rho_disk
-
-    tdim = msh.topology.dim
-    fdim = tdim - 1
-    msh.topology.create_connectivity(fdim, tdim)
-    outer_facets = ft.find(phys.outer_bnd)
-    outer_dofs = fem.locate_dofs_topological(V, fdim, outer_facets)
-    bc0 = fem.dirichletbc(PETSc.ScalarType(0.0), outer_dofs, V)
-
-    a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * ufl.dx
+    # Use epsilon field in the weak form (cellwise DG0 is OK)
+    a = ufl.inner(epsilon * ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = rho * v * ufl.dx
 
     problem = LinearProblem(
-        a, L, bcs=[bc0],
-        petsc_options={"ksp_type": "cg", "pc_type": "hypre", "ksp_rtol": 1e-10},
+        a, L, bcs=[bc],
+        petsc_options={
+            "ksp_type": "cg",
+            "pc_type": "hypre",
+            "ksp_rtol": 1e-10,
+            "ksp_atol": 1e-14,
+            "ksp_max_it": 4000,
+        },
     )
-    phi = problem.solve()
-    phi.name = "phi"
+    uh = problem.solve()
+    uh.name = "phi_p"
 
-    local_min = np.min(phi.x.array) if phi.x.array.size else 0.0
-    local_max = np.max(phi.x.array) if phi.x.array.size else 0.0
+    # Diagnostics
+    local_min = float(np.min(uh.x.array))
+    local_max = float(np.max(uh.x.array))
     gmin = comm.allreduce(local_min, op=MPI.MIN)
     gmax = comm.allreduce(local_max, op=MPI.MAX)
+    n_local = int(np.count_nonzero(inside))
+    n_global = comm.allreduce(n_local, op=MPI.SUM)
 
-    Q_num_local = fem.assemble_scalar(fem.form(rho * ufl.dx))
-    Q_num = comm.allreduce(Q_num_local, op=MPI.SUM)
+    if comm.rank == 0:
+        print("=== Solve summary ===")
+        print(f"p_solve = {p_solve}")
+        print(f"rho_disk = {rho_disk:.6e} C/m^3")
+        print(f"charged DG0 cells = {n_global}")
+        print(f"phi(min/max) = {gmin:.6e}, {gmax:.6e}")
 
-    if rank == 0:
-        print("=== Charged disk Poisson run ===")
-        print(f"R,t,z0       = {args.R:.3e}, {args.t:.3e}, {args.z0:.3e} m")
-        print(f"Q target     = {Q:.6e} C")
-        print(f"Q assembled  = {Q_num:.6e} C")
-        print(f"phi min/max  = {gmin:.6e}, {gmax:.6e} V")
-
-    # --- Output ---
-    # 1) Parallel-safe output (ParaView): .bp
-    out_bp = f"{args.out}.bp"
-    with VTXWriter(comm, out_bp, [phi], engine="BP4") as vtx:
-        vtx.write(0.0)
-    if rank == 0:
-        print(f"Wrote: {out_bp}")
-
-    # 2) Convenience XDMF: interpolate to CG1 so degree matches mesh geometry degree
+    # Output constraint: write_function requires degree == mesh geometry degree.
+    # Mesh is linear, so output phi as CG1 for visualization.
     V1 = fem.functionspace(msh, ("CG", 1))
-    phi1 = fem.Function(V1)
-    phi1.name = "phi"
-    phi1.interpolate(phi)
+    phi = fem.Function(V1)
+    phi.name = "phi"
+    phi.interpolate(uh)
 
-    out_xdmf = f"{args.out}.xdmf"
-    with io.XDMFFile(comm, out_xdmf, "w") as xdmf:
+    outdir.mkdir(parents=True, exist_ok=True)
+    xdmf_path = outdir / "mesh_fields.xdmf"
+
+    # One XDMF file for everything
+    with io.XDMFFile(comm, str(xdmf_path), "w") as xdmf:
         xdmf.write_mesh(msh)
-        xdmf.write_function(phi1)
-    if rank == 0:
-        print(f"Wrote: {out_xdmf}")
+        xdmf.write_function(phi)
+        xdmf.write_function(rho)
+        xdmf.write_function(epsilon)
+        xdmf.write_function(region_id)
+
+        # ---- gate_id scaffold ----
+        # This disk script does not create facet physical groups for gates.
+        # When your CIF/gate workflow provides facet_tags, we can add:
+        #   gate_id = DG0-on-facets or a separate boundary mesh export.
+        # For now: optional debug dump of facet_tags existence.
+        if write_gate_scaffold and comm.rank == 0:
+            has_facets = facet_tags is not None
+            print(f"[gate_id scaffold] facet_tags present: {has_facets}")
+            # If you later want: write facet_tags to XDMF as MeshTags (supported in newer builds).
+
+    if comm.rank == 0:
+        print(f"Wrote: {xdmf_path} (and .h5 sidecar)")
+        print("Open mesh_fields.xdmf in ParaView.")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+
+    ap.add_argument("--R", type=float, required=True, help="Disk radius in meters (e.g. 80e-9)")
+    ap.add_argument("--t", type=float, default=4e-9, help="Disk thickness in meters")
+    ap.add_argument("--Q", type=float, default=1.602176634e-19, help="Total charge in Coulombs")
+    ap.add_argument("--out", type=str, default="disk_Q1e", help="Output directory")
+
+    ap.add_argument("--p", type=int, default=2, help="Polynomial degree for solve (default 2)")
+    ap.add_argument("--epsr", type=float, default=12.0, help="Bulk relative permittivity (default 12)")
+    ap.add_argument("--z0", type=float, default=0.0, help="Disk center z location (m)")
+
+    ap.add_argument("--Lx", type=float, default=600e-9)
+    ap.add_argument("--Ly", type=float, default=600e-9)
+    ap.add_argument("--Lz", type=float, default=400e-9)
+
+    ap.add_argument("--n_diam", type=int, default=28,
+                    help="Target elements across disk diameter: h_disk=2R/n_diam (default 28)")
+    ap.add_argument("--refine_band_R", type=float, default=8.0,
+                    help="Refinement band thickness in units of R (default 8R)")
+    ap.add_argument("--far_h_factor", type=float, default=25.0,
+                    help="h_far = far_h_factor*h_disk (default 25)")
+
+    ap.add_argument("--gate_scaffold", action="store_true",
+                    help="Print facet_tags presence (placeholder for future gate_id export).")
+
+    args = ap.parse_args()
+
+    comm = MPI.COMM_WORLD
+    outdir = Path(args.out)
+    msh_path = outdir / "mesh.msh"
+
+    info = gmsh_build_box_with_refinement_field(
+        comm=comm,
+        Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
+        R=args.R,
+        z0=args.z0,
+        n_diam=args.n_diam,
+        refine_band_R=args.refine_band_R,
+        far_h_factor=args.far_h_factor,
+        msh_path=msh_path,
+    )
+
+    if comm.rank == 0:
+        print("=== Mesh summary ===")
+        print(f"R = {args.R:.3e} m ({args.R*1e9:.1f} nm), t = {args.t:.3e} m")
+        print(f"n_diam = {args.n_diam} -> h_disk = {info['h_disk']:.3e} m ({info['h_disk']*1e9:.3f} nm)")
+        print(f"h_far  = {info['h_far']:.3e} m ({info['h_far']*1e9:.3f} nm)")
+        print(f"refine_band_R = {args.refine_band_R}R -> DistMax = {args.refine_band_R*args.R:.3e} m")
+        print(f"Wrote mesh: {msh_path}")
+
+    solve_and_write_all_fields(
+        comm=comm,
+        msh_path=msh_path,
+        outdir=outdir,
+        R=args.R, t=args.t, Q=args.Q,
+        z0=args.z0,
+        epsr_bulk=args.epsr,
+        p_solve=args.p,
+        write_gate_scaffold=args.gate_scaffold,
+    )
 
 
 if __name__ == "__main__":
