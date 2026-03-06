@@ -31,6 +31,129 @@ from dolfinx import mesh
 from dolfinx.io import gmshio
 from dolfinx.mesh import meshtags, locate_entities_boundary
 
+@dataclass
+class RefinedDiskParams:
+    """Parameters for constructing a 3‑D box with a locally refined disk region.
+
+    A circular disk of radius ``R`` at height ``z0`` (both in meters) is used
+    to define a distance‑based mesh sizing field.  Near the disk the mesh
+    characteristic length is ``h_near = 2*R / n_diam`` and away from the
+    disk the size grows to ``h_far = far_h_factor*h_near``.  A band of
+    thickness ``refine_band_R * R`` controls the transition between the
+    near and far regions.
+
+    Attributes
+    ----------
+    Lx, Ly, Lz : float
+        Dimensions of the surrounding box in metres.
+    R : float
+        Disk radius in metres.
+    z0 : float
+        Height of the disk centre (z‑coordinate) in metres.  The disk
+        occupies the slab ``|z - z0| <= t/2``.
+    n_diam : int
+        Target number of elements across the disk diameter.  The near
+        element size is computed as ``h_near = 2*R / n_diam``.
+    refine_band_R : float
+        Thickness of the refinement band in units of the radius.  The
+        distance field transitions from near to far sizes over a band
+        ``refine_band_R*R``.
+    far_h_factor : float
+        Factor multiplying ``h_near`` to obtain the far field size.
+    """
+    Lx: float
+    Ly: float
+    Lz: float
+    R: float
+    z0: float
+    n_diam: int
+    refine_band_R: float
+    far_h_factor: float
+
+
+def build_refined_disk_box(params: RefinedDiskParams,
+                           comm: MPI.Comm = MPI.COMM_WORLD
+                           ) -> Tuple[mesh.Mesh, meshtags, meshtags, dict]:
+    """Build a 3‑D box mesh with a locally refined circular disk region.
+
+    This helper reproduces the functionality of
+    ``gmsh_build_box_with_refine_to_disk_surface`` from the legacy script.
+    It constructs a Gmsh model with a box and a distance‑based size
+    field around a circular disk on a plane ``z=z0``.  After meshing,
+    the model is converted to a FEniCSx mesh and returned along with
+    empty cell and facet taggings (no physical groups are defined).
+
+    Parameters
+    ----------
+    params : RefinedDiskParams
+        Geometry and refinement parameters.  See the dataclass
+        documentation for details.
+    comm : MPI.Comm, optional
+        MPI communicator for parallel mesh construction and partitioning.
+
+    Returns
+    -------
+    domain : dolfinx.mesh.Mesh
+        The tetrahedral mesh of the domain.
+    cell_tags : dolfinx.mesh.MeshTags
+        Empty cell tags (no subdomains are defined for this geometry).
+    facet_tags : dolfinx.mesh.MeshTags
+        Empty facet tags.  Dirichlet boundary conditions can be applied
+        using ``locate_entities_boundary`` instead.
+    info : dict
+        Dictionary containing ``h_near`` and ``h_far`` used for mesh
+        sizing.  This replicates the diagnostic information from the
+        original script.
+    """
+    R = params.R
+    # Compute target mesh sizes
+    h_near = (2.0 * R) / float(params.n_diam)
+    h_far = params.far_h_factor * h_near
+    info = {"h_near": h_near, "h_far": h_far}
+
+    # Only rank 0 performs the Gmsh CAD operations
+    if comm.rank == 0:
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 1)
+        gmsh.model.add("refined_disk_box")
+        occ = gmsh.model.occ
+        # Box centred at origin: extend from -Lx/2 to Lx/2 etc.
+        x0 = -0.5 * params.Lx
+        y0 = -0.5 * params.Ly
+        zmin = -0.5 * params.Lz
+        box = occ.addBox(x0, y0, zmin, params.Lx, params.Ly, params.Lz)
+        # Helper disk surface for distance field; lives at z0
+        c = occ.addCircle(0.0, 0.0, params.z0, R)
+        cl = occ.addCurveLoop([c])
+        disk_surf = occ.addPlaneSurface([cl])
+        occ.synchronize()
+        # Physical group for volume (optional; id=1)
+        gmsh.model.addPhysicalGroup(3, [box], 1)
+        gmsh.model.setPhysicalName(3, 1, "bulk")
+        # Define distance‑based mesh size field
+        f_dist = gmsh.model.mesh.field.add("Distance")
+        gmsh.model.mesh.field.setNumbers(f_dist, "FacesList", [disk_surf])
+        f_thresh = gmsh.model.mesh.field.add("Threshold")
+        gmsh.model.mesh.field.setNumber(f_thresh, "InField", f_dist)
+        gmsh.model.mesh.field.setNumber(f_thresh, "SizeMin", h_near)
+        gmsh.model.mesh.field.setNumber(f_thresh, "SizeMax", h_far)
+        gmsh.model.mesh.field.setNumber(f_thresh, "DistMin", 0.0)
+        gmsh.model.mesh.field.setNumber(f_thresh, "DistMax", params.refine_band_R * R)
+        gmsh.model.mesh.field.setAsBackgroundMesh(f_thresh)
+        # Global characteristic lengths
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", 0.5 * h_near)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h_far)
+        gmsh.model.mesh.generate(3)
+    # Convert to FEniCSx mesh (domain, cell_tags, facet_tags)
+    out = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
+    domain = out[0]
+    # gmshio.model_to_mesh returns empty MeshTags for cell and facet tags
+    cell_tags = out[1]
+    facet_tags = out[2]
+    if comm.rank == 0:
+        gmsh.finalize()
+    return domain, cell_tags, facet_tags, info
+
 
 @dataclass
 class RodBoreParams:
@@ -82,8 +205,8 @@ def build_rod_with_bore(params: RodBoreParams,
         Tags marking boundary facets.  Tag 301 marks the outer boundary.
     """
     # Consistency check on layer thicknesses
-    assert abs(params.t_si_bot + params.t_sige + params.t_si_top - params.Lz) < 1e-12,
-    "Layer thicknesses must sum to Lz."
+    assert abs(params.t_si_bot + params.t_sige + params.t_si_top - params.Lz) < 1e-12, \
+        "Layer thicknesses must sum to Lz."
 
     gmsh.initialize()
     gmsh.model.add("rod_with_bore")
@@ -254,21 +377,94 @@ def build_gate_box(params: GateBoxParams,
         gmsh.finalize()
         return domain, cell_tags, facet_tags
     else:
-        # Use native box mesh; tag top facets manually
-        # Determine the number of divisions in each direction
+        # Use the native FEniCSx create_box routine.  The mesh is generated
+        # directly by DOLFINx, and the top surface facets are tagged
+        # manually.  No physical groups are defined on the cells.
+        # Compute the number of subdivisions in each coordinate direction
+        # based on the target mesh size ``h``.
         nx = max(2, int(np.ceil(params.Lx / params.h)))
         ny = max(2, int(np.ceil(params.Ly / params.h)))
         nz = max(2, int(np.ceil(params.H  / params.h)))
+        # Define the bounding box: from (−Lx/2, −Ly/2, 0) to (Lx/2, Ly/2, H)
         p0 = np.array([-params.Lx / 2, -params.Ly / 2, 0.0], dtype=np.double)
         p1 = np.array([ params.Lx / 2,  params.Ly / 2,  params.H], dtype=np.double)
-        domain = mesh.create_box(comm, [p0, p1], (nx, ny, nz), cell_type=mesh.CellType.tetrahedron)
-        # No cell tags for a homogeneous box
-        cell_tags = meshtags(domain, domain.topology.dim, np.arange(0, domain.topology.index_map(domain.topology.dim).size_local, dtype=np.int32), np.zeros(domain.topology.index_map(domain.topology.dim).size_local, dtype=np.int32))
-        # Identify top facets by z coordinate
+        domain = mesh.create_box(
+            comm,
+            [p0, p1],
+            (nx, ny, nz),
+            cell_type=mesh.CellType.tetrahedron,
+        )
+        # No cell tags for a homogeneous box (tag value 0 on all cells)
+        num_cells_local = domain.topology.index_map(domain.topology.dim).size_local
+        cell_indices = np.arange(num_cells_local, dtype=np.int32)
+        cell_values = np.zeros(num_cells_local, dtype=np.int32)
+        cell_tags = meshtags(domain, domain.topology.dim, cell_indices, cell_values)
+        # Identify top boundary facets by z coordinate (z ≈ 0) and tag them as 1.
         tdim = domain.topology.dim
-        domain.topology.create_connectivity(tdim-1, tdim)
-        facets = locate_entities_boundary(domain, tdim-1, lambda x: np.isclose(x[2], 0.0, atol=1e-12))
-        values = np.zeros(len(facets), dtype=np.int32)
-        values[:] = 1  # tag 1 on top surface
-        facet_tags = meshtags(domain, tdim-1, facets, values)
+        domain.topology.create_connectivity(tdim - 1, tdim)
+        facets = locate_entities_boundary(
+            domain,
+            tdim - 1,
+            lambda x: np.isclose(x[2], 0.0, atol=1e-12),
+        )
+        facet_values = np.ones(len(facets), dtype=np.int32)
+        facet_tags = meshtags(domain, tdim - 1, facets, facet_values)
         return domain, cell_tags, facet_tags
+
+
+# -----------------------------------------------------------------------------
+# Generic mesh loader for arbitrary geometries
+# -----------------------------------------------------------------------------
+
+def load_gmsh_mesh(filename: str,
+                   dim: int,
+                   comm: MPI.Comm = MPI.COMM_WORLD,
+                   rank: int = 0
+                   ) -> Tuple[mesh.Mesh, meshtags, meshtags]:
+    """Load a Gmsh-generated mesh from a ``.msh`` file.
+
+    This utility provides a simple way to import arbitrary geometries created
+    with Gmsh into a distributed DOLFINx mesh.  It uses the ``gmshio`` module
+    to read the mesh and extract cell and facet markers defined via physical
+    groups in the Gmsh model.  The returned objects can be used directly
+    with FEniCSx solvers and post‑processing routines.
+
+    Parameters
+    ----------
+    filename : str
+        Path to a ``.msh`` file produced by Gmsh.  The file should contain
+        physical groups for cells and (optionally) facets.
+    dim : int
+        Geometrical dimension of the mesh.  For example, ``dim=3`` for
+        tetrahedral or hexahedral meshes, and ``dim=2`` for planar meshes.
+    comm : MPI.Comm, optional
+        MPI communicator over which to distribute the mesh.  Defaults to
+        ``MPI.COMM_WORLD``.
+    rank : int, optional
+        Rank on which the Gmsh model is initialised when reading the file.
+        For serial reading, leave at its default value ``0``.
+
+    Returns
+    -------
+    mesh : dolfinx.mesh.Mesh
+        The distributed FEniCSx mesh.
+    cell_tags : dolfinx.mesh.MeshTags
+        Integer tags associated with each cell.  If no cell tags are present
+        in the ``.msh`` file, this will be an empty tagging.
+    facet_tags : dolfinx.mesh.MeshTags
+        Integer tags associated with boundary facets.  If no facet tags are
+        present in the ``.msh`` file, this will be an empty tagging.
+
+    Notes
+    -----
+    This function wraps ``dolfinx.io.gmshio.read_from_msh`` for convenience.
+    For large meshes, it is advisable to call this function once and
+    subsequently save the mesh in XDMF format to avoid re‑reading the ``.msh``
+    file on every run.
+    """
+    # ``gmshio.read_from_msh`` loads a mesh generated by Gmsh and returns
+    # distributed mesh and tags.  It handles partitioning internally.
+    domain, cell_tags, facet_tags = gmshio.read_from_msh(
+        filename=filename, comm=comm, rank=rank, gdim=dim
+    )
+    return domain, cell_tags, facet_tags
