@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import argparse
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -13,6 +13,12 @@ from ..materials import make_eps_cellwise_from_ct
 from ..mesh_builders import build_mesh_topdisk_3d
 from ..output import function_for_xdmf, write_mesh_and_functions, write_mesh_and_meshtags
 from ..solver import solve_scalar_problem
+
+
+def _flush_print(*args, **kwargs):
+    print(*args, **kwargs)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 def register_parser(subparsers) -> None:
@@ -47,11 +53,8 @@ def register_parser(subparsers) -> None:
     ap.add_argument("--disk_R", type=float, default=50.0)
     ap.add_argument("--Vdisk", type=float, default=1.0)
 
-    ap.add_argument(
-        "--hard_exit",
-        action="store_true",
-        help="Use os._exit(0) after completion to avoid rare PETSc teardown segfaults.",
-    )
+    ap.add_argument("--hard_exit", action="store_true")
+    ap.add_argument("--skip_write", action="store_true")
 
 
 def run(args) -> None:
@@ -60,13 +63,14 @@ def run(args) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     if RANK == 0:
-        print("\n=== CASE: topdisk3d (CAD units before scale) ===")
-        print(f"Domain: Lx={args.Lx} Ly={args.Ly} z in [{args.z_top - args.Lz}, {args.z_top}]")
-        print(f"Disk: center=({args.disk_xc},{args.disk_yc}) R={args.disk_R} V={args.Vdisk}")
-        print(f"h={args.h} deg={args.deg} split_z={args.split_z} eps_r0={args.eps_r0} eps_r1={args.eps_r1}")
-        print(f"BCs: top={args.bc_top} bottom={args.bc_bottom} sides={args.bc_sides}")
-        print(f"scale={args.scale:g}")
+        _flush_print("\n=== CASE: topdisk3d (CAD units before scale) ===")
+        _flush_print(f"Domain: Lx={args.Lx} Ly={args.Ly} z in [{args.z_top - args.Lz}, {args.z_top}]")
+        _flush_print(f"Disk: center=({args.disk_xc},{args.disk_yc}) R={args.disk_R} V={args.Vdisk}")
+        _flush_print(f"h={args.h} deg={args.deg} split_z={args.split_z} eps_r0={args.eps_r0} eps_r1={args.eps_r1}")
+        _flush_print(f"BCs: top={args.bc_top} bottom={args.bc_bottom} sides={args.bc_sides}")
+        _flush_print(f"scale={args.scale:g}")
 
+    _flush_print("[stage] build_mesh_topdisk_3d")
     msh, ct, ft = build_mesh_topdisk_3d(
         Lx=args.Lx,
         Ly=args.Ly,
@@ -83,6 +87,7 @@ def run(args) -> None:
     if args.scale != 1.0:
         msh.geometry.x[:] *= args.scale
 
+    _flush_print("[stage] epsilon and function space")
     eps_cell = make_eps_cellwise_from_ct(
         msh, ct, phys, eps_r0=args.eps_r0, eps_r1=args.eps_r1
     )
@@ -94,7 +99,7 @@ def run(args) -> None:
     def add_tag_bc(tag: int, val: float, label: str):
         facets = ft.find(tag)
         if RANK == 0:
-            print(f"BC {label}: tag={tag} facets={facets.size} val={val}")
+            _flush_print(f"BC {label}: tag={tag} facets={facets.size} val={val}")
         if facets.size == 0:
             return
         dofs = fem.locate_dofs_topological(V, fdim, facets)
@@ -108,7 +113,8 @@ def run(args) -> None:
     if args.bc_sides == "dirichlet0":
         add_tag_bc(phys.SIDES, 0.0, "sides")
 
-    phi, ksp = solve_scalar_problem(
+    _flush_print("[stage] solve")
+    phi, _ksp = solve_scalar_problem(
         V,
         eps_cell,
         bcs=bcs,
@@ -126,37 +132,34 @@ def run(args) -> None:
 
     gmin, gmax = global_minmax(phi)
     if RANK == 0:
-        print(f"\nphi min/max = [{gmin:.6e}, {gmax:.6e}]")
-        if ksp is not None:
-            try:
-                print(
-                    f"[KSP] its={ksp.getIterationNumber()} "
-                    f"reason={ksp.getConvergedReason()} "
-                    f"rnorm={ksp.getResidualNorm():.3e}"
-                )
-            except Exception:
-                pass
+        _flush_print(f"phi min/max = [{gmin:.6e}, {gmax:.6e}]")
 
-    phi_w = function_for_xdmf(phi, msh)
+    if not args.skip_write:
+        _flush_print("[stage] function_for_xdmf")
+        phi_w = function_for_xdmf(phi, msh)
 
-    x_phi = outdir / f"{args.basename}_phi.xdmf"
-    x_eps = outdir / f"{args.basename}_eps_abs.xdmf"
-    x_ft = outdir / f"{args.basename}_facet_tags.xdmf"
-    x_ct = outdir / f"{args.basename}_cell_tags.xdmf"
+        x_phi = outdir / f"{args.basename}_phi.xdmf"
+        x_eps = outdir / f"{args.basename}_eps_abs.xdmf"
+        x_ft = outdir / f"{args.basename}_facet_tags.xdmf"
+        x_ct = outdir / f"{args.basename}_cell_tags.xdmf"
 
-    write_mesh_and_functions(COMM, msh, x_phi, [phi_w])
-    write_mesh_and_functions(COMM, msh, x_eps, [eps_cell])
-    write_mesh_and_meshtags(COMM, msh, x_ft, ft)
-    write_mesh_and_meshtags(COMM, msh, x_ct, ct)
+        _flush_print("[stage] write outputs")
+        write_mesh_and_functions(COMM, msh, x_phi, [phi_w])
+        write_mesh_and_functions(COMM, msh, x_eps, [eps_cell])
+        write_mesh_and_meshtags(COMM, msh, x_ft, ft)
+        write_mesh_and_meshtags(COMM, msh, x_ct, ct)
+
+        if RANK == 0:
+            _flush_print(f"  open {x_phi} (phi)")
+            _flush_print(f"  open {x_eps} (eps_abs)")
+            _flush_print(f"  open {x_ft} (facet tags)")
+            _flush_print(f"  open {x_ct} (cell tags)")
 
     if RANK == 0:
-        print("\nParaView:")
-        print(f"  open {x_phi} (phi)")
-        print(f"  open {x_eps} (eps_abs)")
-        print(f"  open {x_ft} and color by gmsh:physical (TOPDISK={phys.TOPDISK}, TOP={phys.TOP})")
-        print(f"  open {x_ct} and color by gmsh:physical (VOL0={phys.VOL0}, VOL1={phys.VOL1})")
+        _flush_print("[stage] finished main body")
 
     if args.hard_exit:
+        _flush_print("[stage] barrier before hard exit")
         try:
             COMM.Barrier()
         except Exception:

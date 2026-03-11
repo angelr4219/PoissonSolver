@@ -26,30 +26,65 @@ def phi_square_gates_row(x, y, z, a, xs, Vs):
 
 
 def eval_function_on_points(u: fem.Function, points: np.ndarray, comm: MPI.Comm):
+    """
+    Evaluate a scalar Function at physical points.
+
+    Parameters
+    ----------
+    u : fem.Function
+        Scalar FEM function.
+    points : ndarray, shape (N, 3)
+        Physical coordinates.
+    comm : MPI.Comm
+        Communicator.
+
+    Returns
+    -------
+    On rank 0: ndarray shape (N,)
+    On other ranks: None
+    """
     from dolfinx import geometry
+
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"points must have shape (N, 3), got {points.shape}")
 
     msh = u.function_space.mesh
     tree = geometry.bb_tree(msh, msh.topology.dim)
     cand = geometry.compute_collisions_points(tree, points)
     cells = geometry.compute_colliding_cells(msh, cand, points)
 
-    vals_local = np.full((points.shape[0],), np.nan, dtype=np.float64)
+    vals_local = np.full(points.shape[0], np.nan, dtype=np.float64)
+
     for i in range(points.shape[0]):
         cell_candidates = cells.links(i)
-        if len(cell_candidates) > 0:
-            cell = cell_candidates[0]
-            v = np.zeros((1,), dtype=np.float64)
-            u.eval(v, points[i : i + 1], np.array([cell], dtype=np.int32))
-            vals_local[i] = v[0]
+        if len(cell_candidates) == 0:
+            continue
 
-    all_vals = comm.gather(vals_local, root=0)
+        cell = int(cell_candidates[0])
+
+        # This DOLFINx build expects coordinates with length 3.
+        p = np.asarray(points[i], dtype=np.float64)  # shape (3,)
+
+        value = u.eval(p, np.array([cell], dtype=np.int32))
+
+        # Handle scalar return robustly across builds
+        value = np.asarray(value, dtype=np.float64).reshape(-1)
+        if value.size > 0:
+            vals_local[i] = value[0]
+
+    gathered = comm.gather(vals_local, root=0)
+
     if comm.rank != 0:
         return None
 
-    all_vals = np.stack(all_vals, axis=0)
-    out = np.full((points.shape[0],), np.nan, dtype=np.float64)
+    gathered = np.stack(gathered, axis=0)
+    out = np.full(points.shape[0], np.nan, dtype=np.float64)
+
     for j in range(points.shape[0]):
-        col = all_vals[:, j]
+        col = gathered[:, j]
         finite = col[np.isfinite(col)]
-        out[j] = finite[0] if finite.size > 0 else np.nan
+        if finite.size > 0:
+            out[j] = finite[0]
+
     return out

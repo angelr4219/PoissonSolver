@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import argparse
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,12 @@ from ..materials import build_disk_box_fields
 from ..mesh_builders import gmsh_build_box_with_refinement_field, read_gmsh_mesh
 from ..output import function_for_xdmf, write_mesh_and_functions, write_pre_fields
 from ..solver import solve_scalar_problem
+
+
+def _flush_print(*args, **kwargs):
+    print(*args, **kwargs)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 def register_parser(subparsers) -> None:
@@ -38,17 +45,16 @@ def register_parser(subparsers) -> None:
     ap.add_argument("--refine_band_R", type=float, default=8.0, help="Refinement band in units of R")
     ap.add_argument("--far_h_factor", type=float, default=25.0, help="h_far = far_h_factor * h_disk")
 
-    ap.add_argument(
-        "--gate_scaffold",
-        action="store_true",
-        help="Print facet_tags presence as a placeholder for future gate exports.",
-    )
+    ap.add_argument("--gate_scaffold", action="store_true")
+    ap.add_argument("--hard_exit", action="store_true")
+    ap.add_argument("--skip_write", action="store_true")
 
 
 def run(args) -> None:
     outdir = Path(args.out)
     msh_path = outdir / "mesh.msh"
 
+    _flush_print("[stage] build mesh file")
     info = gmsh_build_box_with_refinement_field(
         comm=COMM,
         Lx=args.Lx,
@@ -63,15 +69,17 @@ def run(args) -> None:
     )
 
     if RANK == 0:
-        print("=== CASE: charged_disk_box ===")
-        print(f"R = {args.R:.3e} m ({args.R * 1e9:.1f} nm), t = {args.t:.3e} m")
-        print(f"n_diam = {args.n_diam} -> h_disk = {info['h_disk']:.3e} m ({info['h_disk'] * 1e9:.3f} nm)")
-        print(f"h_far  = {info['h_far']:.3e} m ({info['h_far'] * 1e9:.3f} nm)")
-        print(f"refine_band_R = {args.refine_band_R}R -> DistMax = {args.refine_band_R * args.R:.3e} m")
-        print(f"Wrote mesh: {msh_path}")
+        _flush_print("=== CASE: charged_disk_box ===")
+        _flush_print(f"R = {args.R:.3e} m ({args.R * 1e9:.1f} nm), t = {args.t:.3e} m")
+        _flush_print(f"n_diam = {args.n_diam} -> h_disk = {info['h_disk']:.3e} m ({info['h_disk'] * 1e9:.3f} nm)")
+        _flush_print(f"h_far  = {info['h_far']:.3e} m ({info['h_far'] * 1e9:.3f} nm)")
+        _flush_print(f"refine_band_R = {args.refine_band_R}R -> DistMax = {args.refine_band_R * args.R:.3e} m")
+        _flush_print(f"Wrote mesh: {msh_path}")
 
+    _flush_print("[stage] read mesh")
     msh, cell_tags, facet_tags = read_gmsh_mesh(msh_path, COMM, gdim=3)
 
+    _flush_print("[stage] build fields")
     rho, epsilon, region_id, inside, rho_disk = build_disk_box_fields(
         msh=msh,
         R=args.R,
@@ -81,7 +89,9 @@ def run(args) -> None:
         epsr_bulk=args.epsr,
     )
 
-    write_pre_fields(COMM, msh, outdir, rho, epsilon, region_id)
+    if not args.skip_write:
+        _flush_print("[stage] write pre_fields")
+        write_pre_fields(COMM, msh, outdir, rho, epsilon, region_id)
 
     V = make_function_space(msh, ("CG", args.p))
     fdim = msh.topology.dim - 1
@@ -91,7 +101,8 @@ def run(args) -> None:
     bc_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
     bc = fem.dirichletbc(PETSc.ScalarType(0.0), bc_dofs, V)
 
-    phi, ksp = solve_scalar_problem(
+    _flush_print("[stage] solve")
+    phi, _ksp = solve_scalar_problem(
         V,
         epsilon,
         bcs=[bc],
@@ -112,29 +123,35 @@ def run(args) -> None:
     n_global = COMM.allreduce(n_local, op=COMM.SUM)
 
     if RANK == 0:
-        print("=== Solve summary ===")
-        print(f"p_solve = {args.p}")
-        print(f"rho_disk = {rho_disk:.6e} C/m^3")
-        print(f"charged DG0 cells = {n_global}")
-        print(f"phi(min/max) = {gmin:.6e}, {gmax:.6e}")
-        if ksp is not None:
-            try:
-                print(
-                    f"[KSP] its={ksp.getIterationNumber()} "
-                    f"reason={ksp.getConvergedReason()} "
-                    f"rnorm={ksp.getResidualNorm():.3e}"
-                )
-            except Exception:
-                pass
+        _flush_print("=== Solve summary ===")
+        _flush_print(f"p_solve = {args.p}")
+        _flush_print(f"rho_disk = {rho_disk:.6e} C/m^3")
+        _flush_print(f"charged DG0 cells = {n_global}")
+        _flush_print(f"phi(min/max) = {gmin:.6e}, {gmax:.6e}")
 
-    phi_out = function_for_xdmf(phi, msh)
-    write_mesh_and_functions(
-        COMM,
-        msh,
-        outdir / "mesh_fields.xdmf",
-        [phi_out, rho, epsilon, region_id],
-    )
+    if not args.skip_write:
+        _flush_print("[stage] function_for_xdmf")
+        phi_out = function_for_xdmf(phi, msh)
+
+        _flush_print("[stage] write mesh_fields")
+        write_mesh_and_functions(
+            COMM,
+            msh,
+            outdir / "mesh_fields.xdmf",
+            [phi_out, rho, epsilon, region_id],
+        )
 
     if args.gate_scaffold and RANK == 0:
         has_facets = facet_tags is not None
-        print(f"[gate_id scaffold] facet_tags present: {has_facets}")
+        _flush_print(f"[gate_id scaffold] facet_tags present: {has_facets}")
+
+    if RANK == 0:
+        _flush_print("[stage] finished main body")
+
+    if args.hard_exit:
+        _flush_print("[stage] barrier before hard exit")
+        try:
+            COMM.Barrier()
+        except Exception:
+            pass
+        os._exit(0)
