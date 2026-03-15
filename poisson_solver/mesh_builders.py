@@ -137,6 +137,12 @@ def gmsh_build_box_with_refinement_field(
     refine_band_R: float,
     far_h_factor: float,
     msh_path: Path,
+    xmin: float | None = None,
+    xmax: float | None = None,
+    ymin: float | None = None,
+    ymax: float | None = None,
+    zmin: float | None = None,
+    zmax: float | None = None,
 ):
     if comm.rank != 0:
         return None
@@ -146,10 +152,17 @@ def gmsh_build_box_with_refinement_field(
     gmsh.model.add("charged_disk_box")
     occ = gmsh.model.occ
 
-    x0 = -0.5 * Lx
-    y0 = -0.5 * Ly
-    zmin = -0.5 * Lz
-    box = occ.addBox(x0, y0, zmin, Lx, Ly, Lz)
+    if xmin is None or xmax is None:
+        xmin = -0.5 * Lx
+        xmax = 0.5 * Lx
+    if ymin is None or ymax is None:
+        ymin = -0.5 * Ly
+        ymax = 0.5 * Ly
+    if zmin is None or zmax is None:
+        zmin = -0.5 * Lz
+        zmax = 0.5 * Lz
+
+    box = occ.addBox(xmin, ymin, zmin, xmax - xmin, ymax - ymin, zmax - zmin)
 
     c = occ.addCircle(0.0, 0.0, z0, R)
     cl = occ.addCurveLoop([c])
@@ -184,26 +197,23 @@ def gmsh_build_box_with_refinement_field(
     gmsh.write(str(msh_path))
     gmsh.finalize()
 
-    return dict(h_disk=h_disk, h_far=h_far)
+    return dict(
+        h_disk=h_disk,
+        h_far=h_far,
+        xmin=xmin, xmax=xmax,
+        ymin=ymin, ymax=ymax,
+        zmin=zmin, zmax=zmax,
+    )
 
 
 def read_gmsh_mesh(msh_path: Path, comm: MPI.Comm, gdim: int = 3):
-    """
-    Normalize gmshio.read_from_msh across DOLFINx builds.
-
-    Returns
-    -------
-    msh, cell_tags, facet_tags
-    """
     out = gmshio.read_from_msh(str(msh_path), comm, gdim=gdim)
 
-    # Case 1: tuple/list
     if isinstance(out, (tuple, list)):
         if len(out) >= 3:
             return out[0], out[1], out[2]
         raise RuntimeError(f"Unexpected read_from_msh tuple length: {len(out)}")
 
-    # Case 2: MeshData-like object with attributes
     if hasattr(out, "mesh"):
         msh = out.mesh
         ct = getattr(out, "cell_tags", None)

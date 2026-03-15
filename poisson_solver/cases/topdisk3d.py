@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import List
 
 from petsc4py import PETSc
-from dolfinx import fem
+from dolfinx import fem, io
 
 from ..common import COMM, RANK, Phys, global_minmax, make_function_space
 from ..materials import make_eps_cellwise_from_ct
 from ..mesh_builders import build_mesh_topdisk_3d
-from ..output import function_for_xdmf, write_mesh_and_functions, write_mesh_and_meshtags
+from ..output import function_for_xdmf, write_meshtags_compat
 from ..solver import solve_scalar_problem
 
 
@@ -138,22 +138,18 @@ def run(args) -> None:
         _flush_print("[stage] function_for_xdmf")
         phi_w = function_for_xdmf(phi, msh)
 
-        x_phi = outdir / f"{args.basename}_phi.xdmf"
-        x_eps = outdir / f"{args.basename}_eps_abs.xdmf"
-        x_ft = outdir / f"{args.basename}_facet_tags.xdmf"
-        x_ct = outdir / f"{args.basename}_cell_tags.xdmf"
+        x_all = outdir / f"{args.basename}.xdmf"
 
-        _flush_print("[stage] write outputs")
-        write_mesh_and_functions(COMM, msh, x_phi, [phi_w])
-        write_mesh_and_functions(COMM, msh, x_eps, [eps_cell])
-        write_mesh_and_meshtags(COMM, msh, x_ft, ft)
-        write_mesh_and_meshtags(COMM, msh, x_ct, ct)
+        _flush_print("[stage] write combined output")
+        with io.XDMFFile(COMM, str(x_all), "w", encoding=io.XDMFFile.Encoding.ASCII) as xdmf:
+            xdmf.write_mesh(msh)
+            xdmf.write_function(phi_w)
+            xdmf.write_function(eps_cell)
+            write_meshtags_compat(xdmf, ft, msh)
+            write_meshtags_compat(xdmf, ct, msh)
 
         if RANK == 0:
-            _flush_print(f"  open {x_phi} (phi)")
-            _flush_print(f"  open {x_eps} (eps_abs)")
-            _flush_print(f"  open {x_ft} (facet tags)")
-            _flush_print(f"  open {x_ct} (cell tags)")
+            _flush_print(f"Wrote: {x_all}")
 
     if RANK == 0:
         _flush_print("[stage] finished main body")
