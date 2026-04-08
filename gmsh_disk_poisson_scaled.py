@@ -139,8 +139,7 @@ def build_mesh_with_disk_patch(
             z_top=z_top,
             disk_xc=disk_xc,
             disk_yc=disk_yc,
-            disk_R=disk_R,
-            phys_disk_tag=phys.DISK,
+            disk_R=disk_R, 
             tol=1e-6,
         )
 
