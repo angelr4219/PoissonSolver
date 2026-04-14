@@ -27,7 +27,7 @@ def phi_square_gates_row(x, y, z, a, xs, Vs):
 
 def eval_function_on_points(u: fem.Function, points: np.ndarray, comm: MPI.Comm):
     """
-    Evaluate a scalar Function at physical points.
+    Evaluate a scalar FEM function at physical points.
 
     Parameters
     ----------
@@ -40,8 +40,12 @@ def eval_function_on_points(u: fem.Function, points: np.ndarray, comm: MPI.Comm)
 
     Returns
     -------
-    On rank 0: ndarray shape (N,)
-    On other ranks: None
+    On rank 0:
+        tuple (values, ownership_mask)
+        values: ndarray shape (N,)
+        ownership_mask: ndarray shape (N,), True where a value was found.
+    On other ranks:
+        None
     """
     from dolfinx import geometry
 
@@ -55,6 +59,7 @@ def eval_function_on_points(u: fem.Function, points: np.ndarray, comm: MPI.Comm)
     cells = geometry.compute_colliding_cells(msh, cand, points)
 
     vals_local = np.full(points.shape[0], np.nan, dtype=np.float64)
+    mask_local = np.zeros(points.shape[0], dtype=bool)
 
     for i in range(points.shape[0]):
         cell_candidates = cells.links(i)
@@ -62,29 +67,30 @@ def eval_function_on_points(u: fem.Function, points: np.ndarray, comm: MPI.Comm)
             continue
 
         cell = int(cell_candidates[0])
-
-        # This DOLFINx build expects coordinates with length 3.
-        p = np.asarray(points[i], dtype=np.float64)  # shape (3,)
+        p = np.asarray(points[i], dtype=np.float64)
 
         value = u.eval(p, np.array([cell], dtype=np.int32))
-
-        # Handle scalar return robustly across builds
         value = np.asarray(value, dtype=np.float64).reshape(-1)
         if value.size > 0:
             vals_local[i] = value[0]
+            mask_local[i] = True
 
-    gathered = comm.gather(vals_local, root=0)
+    gathered_vals = comm.gather(vals_local, root=0)
+    gathered_mask = comm.gather(mask_local, root=0)
 
     if comm.rank != 0:
         return None
 
-    gathered = np.stack(gathered, axis=0)
+    gathered_vals = np.stack(gathered_vals, axis=0)
+    gathered_mask = np.stack(gathered_mask, axis=0)
+
     out = np.full(points.shape[0], np.nan, dtype=np.float64)
+    owned = np.zeros(points.shape[0], dtype=bool)
 
     for j in range(points.shape[0]):
-        col = gathered[:, j]
-        finite = col[np.isfinite(col)]
-        if finite.size > 0:
-            out[j] = finite[0]
+        hits = np.where(gathered_mask[:, j])[0]
+        if hits.size > 0:
+            out[j] = gathered_vals[hits[0], j]
+            owned[j] = True
 
-    return out
+    return out, owned

@@ -7,6 +7,7 @@ import numpy as np
 from mpi4py import MPI
 from dolfinx import fem
 
+
 COMM = MPI.COMM_WORLD
 RANK = COMM.rank
 
