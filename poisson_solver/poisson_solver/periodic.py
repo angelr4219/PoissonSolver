@@ -29,14 +29,19 @@ def _global_bounding_box(msh):
 
 def create_periodic_mpc(V, direction: str, bcs=None, scale=1.0, tol=None):
     """
-    Create a one-direction periodic MPC on a scalar CG space.
+    Create periodic MPC constraints on a scalar CG space.
 
     Supported directions:
       - "x"
       - "y"
+      - "xy"
 
-    This deliberately does not try to do simultaneous x+y periodicity yet.
-    Corner handling deserves its own verified step.
+    For "xy", apply:
+      1) x-face periodicity excluding the y-slave edge
+      2) y-face periodicity excluding the x-slave edge
+      3) the shared x-y slave edge/corner separately with an xy relation
+
+    This avoids reusing a slave dof as a master in another constraint chain.
     """
     try:
         import dolfinx_mpc
@@ -46,52 +51,105 @@ def create_periodic_mpc(V, direction: str, bcs=None, scale=1.0, tol=None):
             "in the container/environment."
         ) from e
 
-    if direction not in ("x", "y"):
-        raise ValueError(f"Unsupported periodic direction '{direction}'. Use 'x' or 'y'.")
+    if direction not in ("x", "y", "xy"):
+        raise ValueError(
+            f"Unsupported periodic direction '{direction}'. Use 'x', 'y', or 'xy'."
+        )
 
-    axis = 0 if direction == "x" else 1
     gmin, gmax = _global_bounding_box(V.mesh)
+    gdim = len(gmin)
 
-    if axis >= len(gmin):
-        raise RuntimeError(
-            f"Cannot apply periodicity in direction '{direction}' for a mesh with "
-            f"geometric dimension {len(gmin)}."
-        )
+    if gdim < 2 and direction in ("y", "xy"):
+        raise RuntimeError(f"Mesh geometric dimension {gdim} is incompatible with y-periodicity.")
 
-    slave_value = float(gmax[axis])
-    period = float(gmax[axis] - gmin[axis])
+    Lx = float(gmax[0] - gmin[0])
+    Ly = float(gmax[1] - gmin[1]) if gdim > 1 else 0.0
 
-    if not np.isfinite(period) or period <= 0.0:
-        raise RuntimeError(
-            f"Invalid bounding box for periodic direction '{direction}': "
-            f"min={gmin[axis]}, max={gmax[axis]}"
-        )
+    if direction in ("x", "xy") and (not np.isfinite(Lx) or Lx <= 0.0):
+        raise RuntimeError(f"Invalid x-period from bounding box: min={gmin[0]}, max={gmax[0]}")
+    if direction in ("y", "xy") and (not np.isfinite(Ly) or Ly <= 0.0):
+        raise RuntimeError(f"Invalid y-period from bounding box: min={gmin[1]}, max={gmax[1]}")
+
+    x_slave = float(gmax[0])
+    y_slave = float(gmax[1]) if gdim > 1 else 0.0
 
     if tol is None:
-        tol = 1.0e-12 * max(1.0, abs(slave_value), abs(period))
+        scale_ref = max(1.0, abs(x_slave), abs(y_slave), abs(Lx), abs(Ly))
+        tol = 1.0e-12 * scale_ref
 
     if RANK == 0:
         print(
             f"[periodic] direction={direction}  "
-            f"slave={slave_value:.6e}  period={period:.6e}  tol={tol:.3e}"
+            f"x_slave={x_slave:.6e}  Lx={Lx:.6e}  "
+            f"y_slave={y_slave:.6e}  Ly={Ly:.6e}  tol={tol:.3e}"
         )
 
-    def indicator(x):
-        return np.isclose(x[axis], slave_value, atol=tol)
+    mpc = dolfinx_mpc.MultiPointConstraint(V)
+    bcs_list = [] if bcs is None else bcs
 
-    def relation(x):
+    def relation_x(x):
         out = np.copy(x)
-        out[axis] = x[axis] - period
+        out[0] = x[0] - Lx
         return out
 
-    mpc = dolfinx_mpc.MultiPointConstraint(V)
-    mpc.create_periodic_constraint_geometrical(
-        V,
-        indicator,
-        relation,
-        [] if bcs is None else bcs,
-        scale=scale,
-        tol=tol,
-    )
+    def relation_y(x):
+        out = np.copy(x)
+        out[1] = x[1] - Ly
+        return out
+
+    def relation_xy(x):
+        out = np.copy(x)
+        out[0] = x[0] - Lx
+        out[1] = x[1] - Ly
+        return out
+
+    if direction == "x":
+        def indicator_x(x):
+            return np.isclose(x[0], x_slave, atol=tol)
+
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator_x, relation_x, bcs_list, scale=scale, tol=tol
+        )
+
+    elif direction == "y":
+        def indicator_y(x):
+            return np.isclose(x[1], y_slave, atol=tol)
+
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator_y, relation_y, bcs_list, scale=scale, tol=tol
+        )
+
+    else:
+        # 1) x-face periodicity excluding the shared y-slave edge
+        def indicator_x_only(x):
+            return np.logical_and(
+                np.isclose(x[0], x_slave, atol=tol),
+                np.logical_not(np.isclose(x[1], y_slave, atol=tol)),
+            )
+
+        # 2) y-face periodicity excluding the shared x-slave edge
+        def indicator_y_only(x):
+            return np.logical_and(
+                np.isclose(x[1], y_slave, atol=tol),
+                np.logical_not(np.isclose(x[0], x_slave, atol=tol)),
+            )
+
+        # 3) shared slave edge / corner
+        def indicator_xy_edge(x):
+            return np.logical_and(
+                np.isclose(x[0], x_slave, atol=tol),
+                np.isclose(x[1], y_slave, atol=tol),
+            )
+
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator_x_only, relation_x, bcs_list, scale=scale, tol=tol
+        )
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator_y_only, relation_y, bcs_list, scale=scale, tol=tol
+        )
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator_xy_edge, relation_xy, bcs_list, scale=scale, tol=tol
+        )
+
     mpc.finalize()
     return mpc

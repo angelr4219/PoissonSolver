@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -8,293 +9,325 @@ from petsc4py import PETSc
 import ufl
 
 from dolfinx import fem, io, mesh
-from dolfinx.mesh import CellType, meshtags
 from dolfinx.fem.petsc import LinearProblem
 
 
-def make_mesh(comm, Lx, Ly, Lz, Nx, Ny, Nz, celltype_name):
-    if celltype_name == "hex":
-        celltype = CellType.hexahedron
-    elif celltype_name == "tet":
-        celltype = CellType.tetrahedron
+def create_box_mesh(comm, Lx, Ly, Lz, Nx, Ny, Nz, celltype_str):
+    if celltype_str == "hex":
+        celltype = mesh.CellType.hexahedron
+    elif celltype_str == "tet":
+        celltype = mesh.CellType.tetrahedron
     else:
-        raise ValueError(f"Unknown cell type {celltype_name}")
+        raise ValueError(f"Unknown celltype: {celltype_str}")
 
     return mesh.create_box(
         comm,
-        [[-0.5 * Lx, -0.5 * Ly, 0.0],
-         [ 0.5 * Lx,  0.5 * Ly, Lz]],
-        [Nx, Ny, Nz],
+        points=[np.array([-Lx / 2, -Ly / 2, 0.0]), np.array([Lx / 2, Ly / 2, Lz])],
+        n=[Nx, Ny, Nz],
         cell_type=celltype,
     )
 
 
-def build_cell_fields_dg0(msh, z_sige_top, z_si_top, epsr_sige, epsr_si):
+def build_cell_fields(msh, z_sige_top, z_si_top, epsr_sige, epsr_si):
+    """
+    Build DG0 cellwise fields:
+      - eps_r
+      - mat_id
+      - rho
+    Layer model:
+      0 <= z < z_sige_top         : SiGe
+      z_sige_top <= z < z_si_top  : Si
+      z_si_top <= z <= Lz         : SiGe
+    """
+    tdim = msh.topology.dim
+    num_cells_local = msh.topology.index_map(tdim).size_local
+
     Q0 = fem.functionspace(msh, ("DG", 0))
 
     eps_r = fem.Function(Q0)
-    eps_r.name = "eps_r_dg0"
-
-    rho = fem.Function(Q0)
-    rho.name = "rho_dg0"
-    rho.x.array[:] = 0.0
+    eps_r.name = "eps_r"
 
     mat_id = fem.Function(Q0)
-    mat_id.name = "mat_id_dg0"
+    mat_id.name = "mat_id"
 
-    tdim = msh.topology.dim
-    num_cells = msh.topology.index_map(tdim).size_local
-    cells = np.arange(num_cells, dtype=np.int32)
-    mids = mesh.compute_midpoints(msh, tdim, cells)
-    zmid = mids[:, 2]
+    rho = fem.Function(Q0)
+    rho.name = "rho"
 
-    is_si = (zmid > z_sige_top) & (zmid <= z_si_top)
-    is_sige = ~is_si
+    # Cell centers from DG0 dof coordinates
+    cell_centers = Q0.tabulate_dof_coordinates().reshape(num_cells_local, msh.geometry.dim)
+    zc = cell_centers[:, 2]
 
-    eps_vals = np.empty(num_cells, dtype=np.float64)
-    eps_vals[is_sige] = epsr_sige
-    eps_vals[is_si] = epsr_si
+    sige_mask = (zc < z_sige_top) | (zc >= z_si_top)
+    si_mask = (zc >= z_sige_top) & (zc < z_si_top)
+
+    eps_vals = np.empty(num_cells_local, dtype=np.float64)
+    eps_vals[sige_mask] = epsr_sige
+    eps_vals[si_mask] = epsr_si
+
+    mat_vals = np.empty(num_cells_local, dtype=np.float64)
+    mat_vals[sige_mask] = 1.0  # SiGe
+    mat_vals[si_mask] = 2.0    # Si
+
+    rho_vals = np.zeros(num_cells_local, dtype=np.float64)
+
     eps_r.x.array[:] = eps_vals
-
-    mat_vals = np.empty(num_cells, dtype=np.float64)
-    mat_vals[is_sige] = 1.0
-    mat_vals[is_si] = 2.0
     mat_id.x.array[:] = mat_vals
+    rho.x.array[:] = rho_vals
 
-    return eps_r, rho, mat_id
+    return Q0, eps_r, mat_id, rho
+
+
+def build_gate_mask(msh, R, Lz):
+    """
+    Build a DG0 volume indicator that marks cells near the top surface and
+    under the circular disk-gate footprint.
+    This is not the exact boundary facet tag, but it is very useful in ParaView.
+    """
+    Q0 = fem.functionspace(msh, ("DG", 0))
+    gate_mask = fem.Function(Q0)
+    gate_mask.name = "gate_mask"
+
+    num_cells_local = msh.topology.index_map(msh.topology.dim).size_local
+    cell_centers = Q0.tabulate_dof_coordinates().reshape(num_cells_local, msh.geometry.dim)
+
+    xc = cell_centers[:, 0]
+    yc = cell_centers[:, 1]
+    zc = cell_centers[:, 2]
+
+    # mark cells whose centers are near the top and inside disk projection
+    r2 = xc**2 + yc**2
+    top_band = zc > (Lz - 0.10 * Lz)   # top 10% of box
+    disk_xy = r2 <= R**2
+
+    vals = np.zeros(num_cells_local, dtype=np.float64)
+    vals[top_band & disk_xy] = 1.0
+    gate_mask.x.array[:] = vals
+    return gate_mask
 
 
 def locate_boundary_sets(msh, R, Lz):
+    """
+    Return facet sets:
+      - disk_facets: top boundary facets inside disk
+      - top_free_facets: remaining top boundary facets
+      - bottom_facets
+      - side_facets
+    """
     tdim = msh.topology.dim
     fdim = tdim - 1
 
     msh.topology.create_connectivity(fdim, tdim)
+    msh.topology.create_connectivity(tdim, fdim)
+
     all_bfacets = mesh.exterior_facet_indices(msh.topology)
-    mids = mesh.compute_midpoints(msh, fdim, all_bfacets)
+    x = mesh.compute_midpoints(msh, fdim, all_bfacets)
 
-    x = mids[:, 0]
-    y = mids[:, 1]
-    z = mids[:, 2]
-    r2 = x * x + y * y
+    z = x[:, 2]
+    r2 = x[:, 0] ** 2 + x[:, 1] ** 2
 
-    top_mask = np.isclose(z, 0.0)
-    bot_mask = np.isclose(z, Lz)
+    tol_z = 1e-12 * max(1.0, Lz)
 
-    disk_mask = top_mask & (r2 <= R * R)
-    top_free_mask = top_mask & (r2 > R * R)
-    bottom_mask = bot_mask
-    side_mask = ~(disk_mask | top_free_mask | bottom_mask)
+    top_mask = np.isclose(z, Lz, atol=tol_z)
+    bottom_mask = np.isclose(z, 0.0, atol=tol_z)
+    side_mask = ~(top_mask | bottom_mask)
 
-    disk_facets = all_bfacets[disk_mask].astype(np.int32)
-    top_free_facets = all_bfacets[top_free_mask].astype(np.int32)
-    bottom_facets = all_bfacets[bottom_mask].astype(np.int32)
-    side_facets = all_bfacets[side_mask].astype(np.int32)
+    disk_mask = top_mask & (r2 <= R**2)
+    top_free_mask = top_mask & (~disk_mask)
+
+    disk_facets = all_bfacets[disk_mask]
+    top_free_facets = all_bfacets[top_free_mask]
+    bottom_facets = all_bfacets[bottom_mask]
+    side_facets = all_bfacets[side_mask]
 
     if disk_facets.size == 0:
-        raise RuntimeError(
-            "No top disk-gate facets found from facet midpoints. "
-            "Increase lateral resolution or enlarge R."
-        )
+        raise RuntimeError("No top disk-gate facets found. Increase lateral mesh resolution or enlarge R.")
 
-    facet_indices = np.hstack([disk_facets, top_free_facets, bottom_facets, side_facets])
-    facet_values = np.hstack([
-        np.full(disk_facets.size, 1, dtype=np.int32),
-        np.full(top_free_facets.size, 2, dtype=np.int32),
-        np.full(bottom_facets.size, 3, dtype=np.int32),
-        np.full(side_facets.size, 4, dtype=np.int32),
-    ])
-
-    order = np.argsort(facet_indices)
-    facet_tags = meshtags(msh, fdim, facet_indices[order], facet_values[order])
-
-    return facet_tags, disk_facets, top_free_facets, bottom_facets, side_facets
-
-
-def build_bcs(V, facet_tags, Vgate, Vbottom):
-    fdim = V.mesh.topology.dim - 1
-
-    disk_facets = facet_tags.find(1)
-    bottom_facets = facet_tags.find(3)
-
-    disk_dofs = fem.locate_dofs_topological(V, fdim, disk_facets)
-    bottom_dofs = fem.locate_dofs_topological(V, fdim, bottom_facets)
-
-    bc_gate = fem.dirichletbc(PETSc.ScalarType(Vgate), disk_dofs, V)
-    bc_bottom = fem.dirichletbc(PETSc.ScalarType(Vbottom), bottom_dofs, V)
-    return [bc_gate, bc_bottom]
-
-
-def interpolate_to_cg1(msh, f_in, name):
-    V1 = fem.functionspace(msh, ("CG", 1))
-    f_out = fem.Function(V1)
-    f_out.name = name
-    f_out.interpolate(f_in)
-    return f_out
+    return disk_facets, top_free_facets, bottom_facets, side_facets
 
 
 def solve_case(
-    comm,
     msh,
     R,
-    Lz,
     Vgate,
     Vbottom,
-    sigma_top_cm2,
     z_sige_top,
     z_si_top,
     epsr_sige,
     epsr_si,
+    sigma_top_cm2,
 ):
-    eps0 = 8.8541878128e-12
-    sigma_top = sigma_top_cm2 * 1.0e4 * 1.602176634e-19
+    """
+    Solve:
+      div(eps_r * grad(phi)) = 0
+    with:
+      phi = Vgate on top disk patch
+      phi = Vbottom on bottom
+    and a surrogate free-top surface charge applied as a boundary term on the rest of top.
+    """
+    comm = msh.comm
+    tdim = msh.topology.dim
+    fdim = tdim - 1
+    Lz = msh.geometry.x[:, 2].max()
 
+    # Cell fields
+    Q0, eps_r, mat_id, rho = build_cell_fields(msh, z_sige_top, z_si_top, epsr_sige, epsr_si)
+    gate_mask = build_gate_mask(msh, R, Lz)
+
+    # Facets
+    disk_facets, top_free_facets, bottom_facets, side_facets = locate_boundary_sets(msh, R, Lz)
+
+    # Function space for phi
     V = fem.functionspace(msh, ("CG", 1))
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
 
-    eps_r_dg0, rho_dg0, mat_id_dg0 = build_cell_fields_dg0(
-        msh,
-        z_sige_top=z_sige_top,
-        z_si_top=z_si_top,
-        epsr_sige=epsr_sige,
-        epsr_si=epsr_si,
-    )
+    # Permittivity
+    eps0 = 8.8541878128e-12
+    eps = eps0 * eps_r
 
-    facet_tags, disk_facets, top_free_facets, bottom_facets, side_facets = locate_boundary_sets(msh, R, Lz)
-    bcs = build_bcs(V, facet_tags, Vgate=Vgate, Vbottom=Vbottom)
+    # Measures
+    facet_values = np.hstack([
+        np.full(len(disk_facets), 1, dtype=np.int32),
+        np.full(len(top_free_facets), 2, dtype=np.int32),
+        np.full(len(bottom_facets), 3, dtype=np.int32),
+        np.full(len(side_facets), 4, dtype=np.int32),
+    ])
+    facet_indices = np.hstack([disk_facets, top_free_facets, bottom_facets, side_facets])
+
+    order = np.argsort(facet_indices)
+    facet_tags = mesh.meshtags(msh, fdim, facet_indices[order], facet_values[order])
+
     ds = ufl.Measure("ds", domain=msh, subdomain_data=facet_tags)
+    dx = ufl.Measure("dx", domain=msh)
 
-    a = ufl.inner(eps0 * eps_r_dg0 * ufl.grad(u), ufl.grad(v)) * ufl.dx
-    zero = fem.Constant(msh, PETSc.ScalarType(0.0))
-    L = zero * v * ufl.dx + PETSc.ScalarType(sigma_top) * v * ds(2)
+    # Surface charge density on free top
+    sigma_top = sigma_top_cm2 * 1.0e4 * 1.602176634e-19  # cm^-2 -> m^-2, then e -> C
+    # sign carried by user input
 
-    if comm.rank == 0:
-        print("Starting linear solve...")
+    a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * dx
+    L = rho * v * dx + sigma_top * v * ds(2)
 
-    phi = fem.Function(V)
-    phi.name = "phi"
+    # Dirichlet BCs
+    bc_disk_dofs = fem.locate_dofs_topological(V, fdim, disk_facets)
+    bc_bottom_dofs = fem.locate_dofs_topological(V, fdim, bottom_facets)
 
+    bc_disk = fem.dirichletbc(PETSc.ScalarType(Vgate), bc_disk_dofs, V)
+    bc_bottom = fem.dirichletbc(PETSc.ScalarType(Vbottom), bc_bottom_dofs, V)
+
+    print("Starting linear solve...")
     problem = LinearProblem(
         a,
         L,
-        u=phi,
-        bcs=bcs,
-        petsc_options_prefix="leah_like_",
+        bcs=[bc_disk, bc_bottom],
+        petsc_options_prefix="poisson_",
         petsc_options={
             "ksp_type": "cg",
             "pc_type": "hypre",
-            "ksp_rtol": 1e-10,
-            "ksp_atol": 1e-14,
-            "ksp_max_it": 5000,
+            "ksp_rtol": 1.0e-10,
+            "ksp_atol": 1.0e-14,
+            "ksp_max_it": 2000,
             "ksp_error_if_not_converged": True,
         },
     )
-    problem.solve()
+    phi = problem.solve()
+    phi.name = "phi"
 
-    local_min = float(np.min(phi.x.array))
-    local_max = float(np.max(phi.x.array))
-    gmin = comm.allreduce(local_min, op=MPI.MIN)
-    gmax = comm.allreduce(local_max, op=MPI.MAX)
+    # diagnostics
+    local_min = np.min(phi.x.array)
+    local_max = np.max(phi.x.array)
+    gmin = comm.allreduce(float(local_min), op=MPI.MIN)
+    gmax = comm.allreduce(float(local_max), op=MPI.MAX)
 
     if comm.rank == 0:
         print("=== Solve summary ===")
         print(f"Vgate           = {Vgate:.6f} V")
         print(f"Vbottom         = {Vbottom:.6f} V")
         print(f"sigma_top_cm2   = {sigma_top_cm2:.6e} cm^-2")
-        print(f"disk facets     = {disk_facets.size}")
-        print(f"top free facets = {top_free_facets.size}")
-        print(f"bottom facets   = {bottom_facets.size}")
-        print(f"side facets     = {side_facets.size}")
+        print(f"disk facets     = {len(disk_facets)}")
+        print(f"top free facets = {len(top_free_facets)}")
+        print(f"bottom facets   = {len(bottom_facets)}")
+        print(f"side facets     = {len(side_facets)}")
         print(f"phi min/max     = {gmin:.6e}, {gmax:.6e}")
 
-    rho = interpolate_to_cg1(msh, rho_dg0, "rho")
-    eps_r = interpolate_to_cg1(msh, eps_r_dg0, "eps_r")
-    mat_id = interpolate_to_cg1(msh, mat_id_dg0, "mat_id")
-
-    return phi, rho, eps_r, mat_id
+    return phi, rho, eps_r, mat_id, gate_mask, facet_tags
 
 
-def write_fields_xdmf(comm, msh, phi, rho, eps_r, mat_id, outdir: Path):
-    if comm.rank == 0:
-        print(f"Writing XDMF output to {outdir} ...")
-        outdir.mkdir(parents=True, exist_ok=True)
+def write_all_fields(outdir, msh, phi, rho, eps_r, mat_id, gate_mask):
+    """
+    Write one robust XDMF/H5 pair:
+      - mesh
+      - phi
+      - rho
+      - eps_r
+      - mat_id
+      - gate_mask
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    xdmf_path = outdir / "fields.xdmf"
 
-    comm.barrier()
-
-    with io.XDMFFile(comm, str(outdir / "fields.xdmf"), "w") as xdmf:
+    print(f"Writing XDMF output to {outdir} ...")
+    with io.XDMFFile(msh.comm, str(xdmf_path), "w") as xdmf:
         xdmf.write_mesh(msh)
         xdmf.write_function(phi)
         xdmf.write_function(rho)
         xdmf.write_function(eps_r)
         xdmf.write_function(mat_id)
+        xdmf.write_function(gate_mask)
 
-    comm.barrier()
-
-    if comm.rank == 0:
+    if msh.comm.rank == 0:
         print("Finished writing:")
         print(f"  {outdir / 'fields.xdmf'}")
         print(f"  {outdir / 'fields.h5'}")
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Leah-like layered electrostatics benchmark with top disk gate, free-surface interface charge surrogate, bottom Dirichlet bias, and layered dielectric stack."
-    )
-
+    ap = argparse.ArgumentParser(description="Leah-like disk-gate benchmark with robust XDMF writing.")
     ap.add_argument("--R", type=float, default=None, help="Disk radius in meters")
     ap.add_argument("--Rnm", type=float, default=None, help="Disk radius in nm")
+    ap.add_argument("--Vgate", type=float, required=True)
+    ap.add_argument("--Vbottom", type=float, default=12.0)
 
-    ap.add_argument("--Vgate", type=float, required=True, help="Disk gate voltage in volts")
-    ap.add_argument("--Vbottom", type=float, default=12.0, help="Bottom Dirichlet voltage in volts")
+    ap.add_argument("--Lx", type=float, default=500e-9)
+    ap.add_argument("--Ly", type=float, default=500e-9)
+    ap.add_argument("--Lz", type=float, default=255e-9)
 
-    ap.add_argument("--Lx", type=float, default=500e-9, help="Box size x in meters")
-    ap.add_argument("--Ly", type=float, default=500e-9, help="Box size y in meters")
-    ap.add_argument("--Lz", type=float, default=255e-9, help="Box size z in meters")
+    ap.add_argument("--Nx", type=int, default=60)
+    ap.add_argument("--Ny", type=int, default=60)
+    ap.add_argument("--Nz", type=int, default=48)
 
-    ap.add_argument("--Nx", type=int, default=120, help="Cells in x")
-    ap.add_argument("--Ny", type=int, default=120, help="Cells in y")
-    ap.add_argument("--Nz", type=int, default=96, help="Cells in z")
     ap.add_argument("--celltype", choices=["hex", "tet"], default="hex")
 
     ap.add_argument("--z_sige_top", type=float, default=50e-9)
     ap.add_argument("--z_si_top", type=float, default=55e-9)
+
     ap.add_argument("--epsr_sige", type=float, default=12.0)
     ap.add_argument("--epsr_si", type=float, default=11.7)
 
     ap.add_argument("--sigma_top_cm2", type=float, default=-2.0e11)
     ap.add_argument("--out", type=str, required=True)
-
     args = ap.parse_args()
 
     if args.R is None and args.Rnm is None:
-        raise ValueError("Provide either --R or --Rnm.")
+        raise ValueError("Provide either --R (meters) or --Rnm (nm).")
     if args.R is not None and args.Rnm is not None:
         raise ValueError("Provide only one of --R or --Rnm.")
 
-    if args.R is not None:
-        R = args.R
-        Rnm = 1e9 * R
-    else:
-        R = 1e-9 * args.Rnm
-        Rnm = args.Rnm
+    R = args.R if args.R is not None else args.Rnm * 1.0e-9
 
     comm = MPI.COMM_WORLD
     outdir = Path(args.out)
 
-    if comm.rank == 0:
-        outdir.mkdir(parents=True, exist_ok=True)
-
-    msh = make_mesh(
+    msh = create_box_mesh(
         comm,
-        Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
-        Nx=args.Nx, Ny=args.Ny, Nz=args.Nz,
-        celltype_name=args.celltype,
+        args.Lx, args.Ly, args.Lz,
+        args.Nx, args.Ny, args.Nz,
+        args.celltype,
     )
 
     if comm.rank == 0:
         print("=== Mesh / case summary ===")
         print(f"celltype        = {args.celltype}")
-        print(f"R               = {Rnm:.3f} nm")
+        print(f"R               = {R * 1e9:.3f} nm")
         print(f"Vgate           = {args.Vgate:.6f}")
         print(f"Vbottom         = {args.Vbottom:.6f}")
         print(f"box             = ({args.Lx*1e9:.1f}, {args.Ly*1e9:.1f}, {args.Lz*1e9:.1f}) nm")
@@ -302,21 +335,19 @@ def main():
         print(f"sigma_top_cm2   = {args.sigma_top_cm2:.6e}")
         print(f"outdir          = {outdir}")
 
-    phi, rho, eps_r, mat_id = solve_case(
-        comm=comm,
+    phi, rho, eps_r, mat_id, gate_mask, facet_tags = solve_case(
         msh=msh,
         R=R,
-        Lz=args.Lz,
         Vgate=args.Vgate,
         Vbottom=args.Vbottom,
-        sigma_top_cm2=args.sigma_top_cm2,
         z_sige_top=args.z_sige_top,
         z_si_top=args.z_si_top,
         epsr_sige=args.epsr_sige,
         epsr_si=args.epsr_si,
+        sigma_top_cm2=args.sigma_top_cm2,
     )
 
-    write_fields_xdmf(comm, msh, phi, rho, eps_r, mat_id, outdir)
+    write_all_fields(outdir, msh, phi, rho, eps_r, mat_id, gate_mask)
 
 
 if __name__ == "__main__":

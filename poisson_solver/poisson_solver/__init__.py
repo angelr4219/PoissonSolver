@@ -2,12 +2,11 @@ from .common import COMM, RANK, Phys, make_function_space, degree_compat, global
 from .analytic import g_uvz, phi_square_gates_row, eval_function_on_points
 from .periodic import create_periodic_mpc
 from .outputs import (
-    should_write_outputs,
-    write_meshtags_compat,
-    function_for_xdmf,
-    write_mesh_and_functions,
-    write_mesh_and_meshtags,
-    write_pre_fields,
+    interpolate_to_cg1_if_needed,
+    write_phi_file,
+    write_cell_fields_file,
+    write_meshtags_file,
+    print_written_files,
 )
 from .device_geometry import (
     EPS0,
@@ -34,12 +33,11 @@ __all__ = [
     "phi_square_gates_row",
     "eval_function_on_points",
     "create_periodic_mpc",
-    "should_write_outputs",
-    "write_meshtags_compat",
-    "function_for_xdmf",
-    "write_mesh_and_functions",
-    "write_mesh_and_meshtags",
-    "write_pre_fields",
+    "interpolate_to_cg1_if_needed",
+    "write_phi_file",
+    "write_cell_fields_file",
+    "write_meshtags_file",
+    "print_written_files",
     "EPS0",
     "E_CHARGE",
     "BoxSpec",

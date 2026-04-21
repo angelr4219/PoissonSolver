@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from dolfinx import fem
+
 from poisson_solver import (
     COMM,
     RANK,
@@ -16,9 +18,9 @@ from poisson_solver import (
     build_disk_problem,
     build_cube_problem,
     solve_poisson_box,
-    write_pre_fields,
-    write_mesh_and_functions,
-    function_for_xdmf,
+    write_phi_file,
+    write_cell_fields_file,
+    print_written_files,
 )
 
 
@@ -32,7 +34,7 @@ def parse_args():
     )
 
     p.add_argument("--shape", choices=["sphere", "disk", "cube"], required=True)
-    p.add_argument("--outdir", type=str, default="Results/shape_run")
+    p.add_argument("--outdir", type=str, required=True)
 
     p.add_argument("--Lx_nm", type=float, default=400.0)
     p.add_argument("--Ly_nm", type=float, default=400.0)
@@ -41,34 +43,23 @@ def parse_args():
 
     p.add_argument("--deg", type=int, default=1)
     p.add_argument("--eps_r", type=float, default=11.7)
+    p.add_argument("--periodic", choices=["none", "x", "y", "xy"], default="none")
 
-    p.add_argument("--periodic", choices=["none", "x", "y"], default="none")
-
-    # Common center
     p.add_argument("--xc_nm", type=float, default=0.0)
     p.add_argument("--yc_nm", type=float, default=0.0)
     p.add_argument("--zc_nm", type=float, default=0.0)
 
-    # Sphere / disk
     p.add_argument("--R_nm", type=float, default=30.0)
-
-    # Disk thickness
     p.add_argument("--t_nm", type=float, default=6.0)
-
-    # Cube side
     p.add_argument("--a_nm", type=float, default=60.0)
 
-    # Charge in units of electron charge
     p.add_argument("--Q_e", type=float, default=1.0)
-
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-
     outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
 
     box = BoxSpec(
         Lx=nm(args.Lx_nm),
@@ -77,7 +68,6 @@ def main():
         h=nm(args.h_nm),
     )
     msh, nx, ny, nz = build_centered_box_mesh(COMM, box)
-
     Q_total = float(args.Q_e) * E_CHARGE
 
     if args.shape == "sphere":
@@ -103,7 +93,7 @@ def main():
             msh, spec=spec, eps_r=args.eps_r, Q_total=Q_total
         )
 
-    elif args.shape == "cube":
+    else:
         spec = CubeSpec(
             xc=nm(args.xc_nm),
             yc=nm(args.yc_nm),
@@ -114,8 +104,10 @@ def main():
             msh, spec=spec, eps_r=args.eps_r, Q_total=Q_total
         )
 
-    else:
-        raise ValueError(f"Unsupported shape {args.shape}")
+    Q0 = rho.function_space
+    shape_mask = fem.Function(Q0, name="shape_mask")
+    shape_mask.x.array[:] = 0.0
+    shape_mask.x.array[inside] = 1.0
 
     if RANK == 0:
         print("")
@@ -126,11 +118,10 @@ def main():
         print(f"mesh           : {nx} x {ny} x {nz}")
         print(f"eps_r          : {args.eps_r}")
         print(f"periodic       : {args.periodic}")
+        print(f"outdir         : {outdir}")
         print("")
 
-    write_pre_fields(COMM, msh, outdir, rho, epsilon, region_id)
-
-    phi_h, _mpc = solve_poisson_box(
+    phi, _mpc = solve_poisson_box(
         msh,
         Lx=box.Lx,
         Ly=box.Ly,
@@ -141,8 +132,21 @@ def main():
         periodic=args.periodic,
     )
 
-    phi_out = function_for_xdmf(phi_h, msh)
-    write_mesh_and_functions(COMM, msh, outdir / "solution.xdmf", [phi_out])
+    xdmf_phi = write_phi_file(
+        msh=msh,
+        phi=phi,
+        outdir=outdir,
+        basename="phi_solution",
+    )
+
+    xdmf_aux = write_cell_fields_file(
+        msh=msh,
+        outdir=outdir,
+        fields=[rho, epsilon, region_id, shape_mask],
+        basename="cell_fields",
+    )
+
+    print_written_files(xdmf_phi, xdmf_aux)
 
 
 if __name__ == "__main__":

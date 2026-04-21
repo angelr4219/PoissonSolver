@@ -1,98 +1,118 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Iterable
 
 from dolfinx import fem, io, mesh as dmesh
 
-from .common import RANK, degree_compat, make_function_space
+from .common import COMM, RANK, degree_compat, make_function_space
 
 
-def should_write_outputs() -> bool:
-    return os.environ.get("NOWRITE", "0") != "1"
-
-
-def write_meshtags_compat(xdmf: io.XDMFFile, mt: dmesh.MeshTags, msh: dmesh.Mesh) -> None:
+def _write_meshtags_compat(xdmf: io.XDMFFile, mt: dmesh.MeshTags, msh: dmesh.Mesh) -> None:
     try:
         xdmf.write_meshtags(mt)
     except TypeError:
         xdmf.write_meshtags(mt, msh.geometry)
 
 
-def function_for_xdmf(phi: fem.Function, msh: dmesh.Mesh) -> fem.Function:
-    mesh_deg = degree_compat(msh.geometry.cmap.degree)
-    sol_deg = degree_compat(phi.function_space.ufl_element().degree)
-    if sol_deg == mesh_deg:
-        return phi
+def interpolate_to_cg1_if_needed(fn: fem.Function) -> fem.Function:
+    msh = fn.function_space.mesh
 
-    Vout = make_function_space(msh, ("CG", mesh_deg))
-    phi_out = fem.Function(Vout, name=phi.name)
     try:
-        phi_out.interpolate(phi)
+        deg = int(fn.function_space.ufl_element().degree())
     except Exception:
-        expr = fem.Expression(phi, Vout.element.interpolation_points())
-        phi_out.interpolate(expr)
-    return phi_out
+        try:
+            deg = int(fn.function_space.ufl_element().degree)
+        except Exception:
+            deg = 1
+
+    if deg == 1:
+        return fn
+
+    V1 = make_function_space(msh, ("CG", 1))
+    fn_out = fem.Function(V1, name=fn.name)
+
+    try:
+        fn_out.interpolate(fn)
+    except Exception:
+        expr = fem.Expression(fn, V1.element.interpolation_points())
+        fn_out.interpolate(expr)
+
+    return fn_out
 
 
-def write_mesh_and_functions(
-    comm, msh: dmesh.Mesh, path: str | Path, functions: Iterable[fem.Function]
-) -> Path | None:
-    if not should_write_outputs():
-        if RANK == 0:
-            print("NOTE: NOWRITE=1, skipping output")
-        return None
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with io.XDMFFile(comm, str(path), "w") as xdmf:
-        xdmf.write_mesh(msh)
-        for fn in functions:
-            xdmf.write_function(fn)
-
-    if RANK == 0:
-        print(f"Wrote: {path}")
-    return path
-
-
-def write_mesh_and_meshtags(
-    comm, msh: dmesh.Mesh, path: str | Path, mt: dmesh.MeshTags
-) -> Path | None:
-    if not should_write_outputs():
-        if RANK == 0:
-            print("NOTE: NOWRITE=1, skipping output")
-        return None
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with io.XDMFFile(comm, str(path), "w") as xdmf:
-        xdmf.write_mesh(msh)
-        write_meshtags_compat(xdmf, mt, msh)
-
-    if RANK == 0:
-        print(f"Wrote: {path}")
-    return path
-
-
-def write_pre_fields(comm, msh, outdir: str | Path, rho, epsilon, region_id) -> Path | None:
-    if not should_write_outputs():
-        if RANK == 0:
-            print("NOTE: NOWRITE=1, skipping output")
-        return None
-
+def write_phi_file(
+    msh: dmesh.Mesh,
+    phi: fem.Function,
+    outdir: str | Path,
+    basename: str = "phi_solution",
+) -> Path:
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    xdmf_path = outdir / "pre_fields.xdmf"
 
-    with io.XDMFFile(comm, str(xdmf_path), "w") as xdmf:
+    xdmf_phi = outdir / f"{basename}.xdmf"
+
+    phi_out = interpolate_to_cg1_if_needed(phi)
+    if RANK == 0 and phi_out is not phi:
+        try:
+            sol_deg = int(phi.function_space.ufl_element().degree())
+        except Exception:
+            try:
+                sol_deg = int(phi.function_space.ufl_element().degree)
+            except Exception:
+                sol_deg = -1
+        print(f"[INFO] Writing interpolated CG1 phi for XDMF compatibility (input degree was {sol_deg}).")
+
+    with io.XDMFFile(COMM, str(xdmf_phi), "w") as xdmf:
         xdmf.write_mesh(msh)
-        xdmf.write_function(rho)
-        xdmf.write_function(epsilon)
-        xdmf.write_function(region_id)
+        xdmf.write_function(phi_out)
 
+    return xdmf_phi
+
+
+def write_cell_fields_file(
+    msh: dmesh.Mesh,
+    outdir: str | Path,
+    fields: Iterable[fem.Function],
+    basename: str = "cell_fields",
+) -> Path:
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    xdmf_aux = outdir / f"{basename}.xdmf"
+
+    with io.XDMFFile(COMM, str(xdmf_aux), "w") as xdmf:
+        xdmf.write_mesh(msh)
+        for fn in fields:
+            xdmf.write_function(fn)
+
+    return xdmf_aux
+
+
+def write_meshtags_file(
+    msh: dmesh.Mesh,
+    mt: dmesh.MeshTags,
+    outdir: str | Path,
+    basename: str = "mesh_tags",
+) -> Path:
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    xdmf_tags = outdir / f"{basename}.xdmf"
+
+    with io.XDMFFile(COMM, str(xdmf_tags), "w") as xdmf:
+        xdmf.write_mesh(msh)
+        _write_meshtags_compat(xdmf, mt, msh)
+
+    return xdmf_tags
+
+
+def print_written_files(*paths) -> None:
     if RANK == 0:
-        print(f"Wrote: {xdmf_path} (and .h5 sidecar)  [pre-solve]")
-    return xdmf_path
+        print("\n=== Wrote files ===")
+        for p in paths:
+            if p is not None:
+                print(f"  {p}")
+        print("\nParaView tips:")
+        print("  - Open the phi_solution.xdmf file for the scalar potential.")
+        print("  - Open the cell_fields.xdmf file for rho / epsilon / region_id / shape_mask.")
