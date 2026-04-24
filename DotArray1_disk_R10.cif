@@ -1,0 +1,10 @@
+( Input parameter file : CreateMultiDotModels.xml )
+( Date                 : Fri Aug 22 07:43:31 2025 )
+()
+Layer Base;             (Specifies computational domain size.)
+Box 500 500 0 0;
+
+Layer Disk;             (10 nm radius disk centered at 250,250; 32-gon)
+R 10 250 250;
+
+END
