@@ -219,8 +219,9 @@ def locate_boundary_sets(msh, disk_cx_m, disk_cy_m, disk_r_m, Lz_m):
     z = mids[:, 2]
     r2 = (x - disk_cx_m) ** 2 + (y - disk_cy_m) ** 2
 
-    top_mask = np.isclose(z, 0.0)
-    bottom_mask = np.isclose(z, Lz_m)
+    tol_m = 1e-11  # 0.01 nm — much smaller than any mesh element height
+    top_mask = np.abs(z) < tol_m
+    bottom_mask = np.abs(z - Lz_m) < tol_m
     disk_mask = top_mask & (r2 <= disk_r_m * disk_r_m)
     top_free_mask = top_mask & ~disk_mask
     side_mask = ~(disk_mask | top_free_mask | bottom_mask)
@@ -246,13 +247,15 @@ def locate_boundary_sets(msh, disk_cx_m, disk_cy_m, disk_r_m, Lz_m):
     return facet_tags, disk_facets, top_free_facets, bottom_facets, side_facets
 
 
-def build_bcs(V, facet_tags, V_gate, V_bottom, bottom_bc_type, side_bc_type, V_side):
+def build_bcs(V, facet_tags, V_gate, V_bottom, bottom_bc_type, side_bc_type, V_side,
+              skip_gate=False):
     fdim = V.mesh.topology.dim - 1
     bcs = []
 
-    gate_facets = facet_tags.find(1)
-    gate_dofs = fem.locate_dofs_topological(V, fdim, gate_facets)
-    bcs.append(fem.dirichletbc(PETSc.ScalarType(V_gate), gate_dofs, V))
+    if not skip_gate:
+        gate_facets = facet_tags.find(1)
+        gate_dofs = fem.locate_dofs_topological(V, fdim, gate_facets)
+        bcs.append(fem.dirichletbc(PETSc.ScalarType(V_gate), gate_dofs, V))
 
     if bottom_bc_type.upper() == "DIRICHLET":
         bottom_facets = facet_tags.find(3)
@@ -332,6 +335,8 @@ def main():
     ap.add_argument("--side_bc_value", type=float, default=0.0)
     ap.add_argument("--sigma_top_cm2", type=float, default=0.0)
     ap.add_argument("--interface_bc_flag", action="store_true")
+    ap.add_argument("--skip_disk_bc", action="store_true",
+                    help="Omit gate Dirichlet BC (Track A: background-only validation)")
 
     ap.add_argument("--celltype", choices=["hex", "tet"], default="tet")
     ap.add_argument("--h_nm", type=float, default=6.0)
@@ -434,14 +439,32 @@ def main():
     V = fem.functionspace(msh, ("CG", 1))
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    bcs = build_bcs(V, facet_tags, args.V_gate, args.V_bottom, args.bottom_bc_type, args.side_bc_type, args.side_bc_value)
+    bcs = build_bcs(V, facet_tags, args.V_gate, args.V_bottom, args.bottom_bc_type, args.side_bc_type, args.side_bc_value,
+                    skip_gate=args.skip_disk_bc)
     ds = ufl.Measure("ds", domain=msh, subdomain_data=facet_tags)
 
     sigma_C_m2 = args.sigma_top_cm2 * 1.0e4 * E_CHARGE if args.interface_bc_flag else 0.0
     zero = fem.Constant(msh, PETSc.ScalarType(0.0))
 
     a = ufl.inner(EPS0 * eps_r_dg0 * ufl.grad(u), ufl.grad(v)) * ufl.dx
-    L = rho_dg0 * v * ufl.dx + zero * v * ufl.dx + PETSc.ScalarType(sigma_C_m2) * v * ds(2)
+    # Neumann BC for interface charge: (D_above - D_semi)·n_out = σ_f gives g = -σ_f.
+    # In no-gate mode apply sigma over the entire top surface (ds(1)+ds(2)) so the
+    # solution is laterally uniform; in gate-active mode only the free surface (ds(2))
+    # carries sigma (the disk region's Dirichlet BC overrides the Neumann anyway).
+    sigma_top_ds = (ds(1) + ds(2)) if args.skip_disk_bc else ds(2)
+    L = rho_dg0 * v * ufl.dx + zero * v * ufl.dx - PETSc.ScalarType(sigma_C_m2) * v * sigma_top_ds
+
+    # Diagnostic: verify top-surface tag coverage
+    _one = fem.Constant(msh, PETSc.ScalarType(1.0))
+    area1  = msh.comm.allreduce(fem.assemble_scalar(fem.form(_one * ds(1))),  op=MPI.SUM)
+    area2  = msh.comm.allreduce(fem.assemble_scalar(fem.form(_one * ds(2))),  op=MPI.SUM)
+    area12 = msh.comm.allreduce(fem.assemble_scalar(fem.form(_one * (ds(1) + ds(2)))), op=MPI.SUM)
+    lx_nm, ly_nm = args.Lx_nm, args.Ly_nm
+    expected_top_nm2 = lx_nm * ly_nm
+    disk_analytical_nm2 = 3.14159265 * args.disk_radius_nm ** 2
+    print(f"top tag areas : ds(1)={area1*1e18:.1f} nm²  ds(2)={area2*1e18:.1f} nm²"
+          f"  total={area12*1e18:.1f} nm²  expected={expected_top_nm2:.0f} nm²"
+          f"  disk_π R²={disk_analytical_nm2:.1f} nm²")
 
     phi = fem.Function(V)
     phi.name = "phi"
@@ -559,7 +582,8 @@ def main():
             f.write(f"box [nm]     : ({geom.Lx_nm:.3f}, {geom.Ly_nm:.3f}, {Lz_m*1e9:.3f})\n")
             f.write(f"disk [nm]    : R={geom.disk_radius_nm:.3f}, center_box=({geom.disk_cx_nm_box:.3f}, {geom.disk_cy_nm_box:.3f})\n")
             f.write(f"disk [nm]    : center_phys=({geom.disk_cx_nm_phys:.3f}, {geom.disk_cy_nm_phys:.3f})\n")
-            f.write(f"BCs          : gate={args.V_gate:.6f} V, bottom={args.V_bottom:.6f} V ({args.bottom_bc_type}), side={args.side_bc_type}\n")
+            gate_str = "DISABLED (no-gate)" if args.skip_disk_bc else f"{args.V_gate:.6f} V"
+            f.write(f"BCs          : gate={gate_str}, bottom={args.V_bottom:.6f} V ({args.bottom_bc_type}), side={args.side_bc_type}\n")
             f.write(f"sigma_top    : {(args.sigma_top_cm2 if args.interface_bc_flag else 0.0):.6e} e/cm^2\n")
             for i, (za, zb, layer) in enumerate(spans):
                 f.write(
@@ -581,7 +605,8 @@ def main():
         print(f"box [nm]     : ({geom.Lx_nm:.3f}, {geom.Ly_nm:.3f}, {Lz_m*1e9:.3f})")
         print(f"disk [nm]    : R={geom.disk_radius_nm:.3f}, center_box=({geom.disk_cx_nm_box:.3f}, {geom.disk_cy_nm_box:.3f})")
         print(f"disk [nm]    : center_phys=({geom.disk_cx_nm_phys:.3f}, {geom.disk_cy_nm_phys:.3f})")
-        print(f"BCs          : gate={args.V_gate:.6f} V, bottom={args.V_bottom:.6f} V ({args.bottom_bc_type}), side={args.side_bc_type}")
+        gate_str = "DISABLED (no-gate)" if args.skip_disk_bc else f"{args.V_gate:.6f} V"
+        print(f"BCs          : gate={gate_str}, bottom={args.V_bottom:.6f} V ({args.bottom_bc_type}), side={args.side_bc_type}")
         print(f"phi min/max  : {gphi_min:.12e}, {gphi_max:.12e}")
         print(f"rho min/max  : {grho_min:.12e}, {grho_max:.12e}")
         print(f"eps min/max  : {geps_min:.12e}, {geps_max:.12e}")
