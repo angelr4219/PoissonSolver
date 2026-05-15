@@ -275,6 +275,58 @@ def interpolate_to_cg1(msh, f_in, name):
     f_out.x.scatter_forward()
     return f_out
 
+def build_periodic_problem(V, a, L, bcs, periodic, petsc_options):
+    try:
+        from dolfinx_mpc import MultiPointConstraint, LinearProblem as MPCLinearProblem
+    except Exception as e:
+        raise RuntimeError("Periodic BCs requested but dolfinx_mpc is not available in this environment.") from e
+
+    comm = V.mesh.comm
+    x = V.mesh.geometry.x
+    xmin = comm.allreduce(float(np.min(x[:, 0])), op=MPI.MIN)
+    xmax = comm.allreduce(float(np.max(x[:, 0])), op=MPI.MAX)
+    ymin = comm.allreduce(float(np.min(x[:, 1])), op=MPI.MIN)
+    ymax = comm.allreduce(float(np.max(x[:, 1])), op=MPI.MAX)
+
+    dx = xmax - xmin
+    dy = ymax - ymin
+    tol = 1e-12 * max(dx, dy, 1.0)
+
+    mpc = MultiPointConstraint(V)
+
+    if "x" in periodic:
+        def x_slave(xx):
+            return np.isclose(xx[0], xmax, atol=tol)
+
+        def x_relation(xx):
+            out = xx.copy()
+            out[0] -= dx
+            return out
+
+        mpc.create_periodic_constraint_geometrical(V, x_slave, x_relation, bcs)
+
+    if "y" in periodic:
+        def y_slave(xx):
+            return np.isclose(xx[1], ymax, atol=tol)
+
+        def y_relation(xx):
+            out = xx.copy()
+            out[1] -= dy
+            return out
+
+        mpc.create_periodic_constraint_geometrical(V, y_slave, y_relation, bcs)
+
+    mpc.finalize()
+
+    u_mpc = fem.Function(mpc.function_space)
+    u_mpc.name = "phi"
+
+    problem = MPCLinearProblem(
+        a, L, mpc=mpc, bcs=bcs, u=u_mpc, petsc_options=petsc_options
+    )
+    return problem, mpc, u_mpc
+
+
 
 def sample_center_probe_z(msh, phi, npts=101):
     zmin = 0.0
@@ -401,9 +453,6 @@ def main():
 
     rho_layers = fill_or_validate(rho_layers, len(layers), 0.0)
 
-    if args.periodic != "none":
-        raise RuntimeError("This write-checked version is for non-periodic runs first. Once this is verified, periodic can be re-enabled cleanly.")
-
     if args.side_bc_type == "dirichlet" and args.periodic != "none":
         raise ValueError("Use either periodic sides or side Dirichlet BCs, not both.")
 
@@ -446,23 +495,36 @@ def main():
     phi = fem.Function(V)
     phi.name = "phi"
 
-    problem = LinearProblem(
-        a,
-        L,
-        u=phi,
-        bcs=bcs,
-        petsc_options_prefix="diskbox_",
-        petsc_options={
-            "ksp_type": args.petsc_ksp,
-            "pc_type": args.petsc_pc,
-            "ksp_rtol": 1e-10,
-            "ksp_atol": 1e-14,
-            "ksp_max_it": 10000,
-            "ksp_error_if_not_converged": True,
-        },
-    )
-    problem.solve()
-    phi.x.scatter_forward()
+    petsc_options = {
+        "ksp_type": args.petsc_ksp,
+        "pc_type": args.petsc_pc,
+        "ksp_rtol": 1e-10,
+        "ksp_atol": 1e-14,
+        "ksp_max_it": 10000,
+        "ksp_error_if_not_converged": True,
+    }
+
+    if args.periodic != "none":
+        problem, mpc, phi_mpc = build_periodic_problem(V, a, L, bcs, args.periodic, petsc_options)
+        problem.solve()
+        phi_mpc.x.scatter_forward()
+
+        phi = fem.Function(V)
+        phi.name = "phi"
+        phi.x.array[:] = phi_mpc.x.array[:]
+        mpc.backsubstitution(phi)
+        phi.x.scatter_forward()
+    else:
+        problem = LinearProblem(
+            a,
+            L,
+            u=phi,
+            bcs=bcs,
+            petsc_options_prefix="diskbox_",
+            petsc_options=petsc_options,
+        )
+        problem.solve()
+        phi.x.scatter_forward()
 
     rho = interpolate_to_cg1(msh, rho_dg0, "rho")
     eps_r = interpolate_to_cg1(msh, eps_r_dg0, "eps_r")
