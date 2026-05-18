@@ -165,6 +165,103 @@ def make_box_mesh(comm, Lx_m, Ly_m, Lz_m, h_nm, celltype_name):
     return msh, Nx, Ny, Nz
 
 
+def make_gmsh_mesh(comm, Lx_m, Ly_m, Lz_m,
+                   disk_cx_m, disk_cy_m,
+                   h_bulk_nm, h_gate_nm,
+                   refine_radius_nm, refine_depth_nm):
+    """
+    Build a locally refined tetrahedral mesh using Gmsh.
+
+    The mesh is fine near the disk gate (h_gate_nm) and coarser everywhere else
+    (h_bulk_nm). Refinement decays as a Gaussian centred on (disk_cx_m, disk_cy_m, 0).
+
+    All solver / output logic downstream is unchanged — locate_boundary_sets() does
+    the geometric disk/top/bottom/side tagging on this mesh exactly as it does on the
+    create_box mesh.
+
+    Returns (msh, 0, 0, 0). The trailing zeros stand in for Nx/Ny/Nz, which are
+    meaningless for a non-uniform mesh; summary output uses n_cells instead.
+    """
+    try:
+        import gmsh
+    except ImportError:
+        raise ImportError(
+            "gmsh Python package not found in this environment.\n"
+            "Inside the Docker container run:  pip install gmsh\n"
+            "or pass --mesh_mode uniform to use the built-in create_box path."
+        )
+    from dolfinx.io import gmshio
+
+    h_bulk   = h_bulk_nm          * 1e-9
+    h_gate   = h_gate_nm          * 1e-9
+    refine_r = refine_radius_nm   * 1e-9
+    refine_d = refine_depth_nm    * 1e-9
+    x0, y0   = -0.5 * Lx_m, -0.5 * Ly_m
+    cx, cy   = disk_cx_m, disk_cy_m
+
+    # gmsh.initialize() must be called on every MPI rank.
+    gmsh.initialize()
+
+    if comm.rank == 0:
+        gmsh.model.add("disk_gate_local")
+        gmsh.option.setNumber("General.Verbosity", 1)
+        gmsh.option.setNumber("Mesh.Algorithm3D", 4)   # Delaunay-3D
+
+        # ── geometry: single box ──────────────────────────────────────────────
+        box = gmsh.model.occ.addBox(x0, y0, 0.0, Lx_m, Ly_m, Lz_m)
+        gmsh.model.occ.synchronize()
+
+        # gmshio requires at least one volume physical group.
+        gmsh.model.addPhysicalGroup(3, [box], tag=1, name="domain")
+
+        # ── mesh size field: Gaussian centred on disk axis ────────────────────
+        # h(x,y,z) = h_gate + (h_bulk - h_gate)
+        #            * (1 - exp( -(r_lat²/refine_r² + z²/refine_d²) ))
+        #
+        # At (cx, cy, 0):         h = h_gate   (finest)
+        # At distances >> refine: h → h_bulk   (coarsest)
+        fid = gmsh.model.mesh.field.add("MathEval")
+        fstr = (
+            f"{h_gate:.8e}"
+            f" + ({h_bulk:.8e} - {h_gate:.8e})"
+            f" * (1 - Exp(-("
+            f"  ((x - ({cx:.8e}))^2 + (y - ({cy:.8e}))^2) / ({refine_r:.8e})^2"
+            f"  + (z / ({refine_d:.8e}))^2"
+            f")))"
+        )
+        gmsh.model.mesh.field.setString(fid, "F", fstr)
+        gmsh.model.mesh.field.setAsBackgroundMesh(fid)
+
+        # Let the field drive all sizes; disable geometry-based heuristics.
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints",         0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature",      0)
+        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeMin", h_gate)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", h_bulk)
+
+        gmsh.model.mesh.generate(3)
+        # "Relocate3D" is a light quality pass available in all Gmsh versions.
+        # Netgen optimizer produces BFGS errors on some builds so we skip it.
+        try:
+            gmsh.model.mesh.optimize("Relocate3D")
+        except Exception:
+            pass  # optimizer not critical — mesh is still valid
+
+    # model_to_mesh return signature varies across DOLFINx versions; unpack safely.
+    _mesh_data = gmshio.model_to_mesh(gmsh.model, comm, rank=0, gdim=3)
+    msh = _mesh_data[0]
+    gmsh.finalize()
+
+    n_cells_local  = msh.topology.index_map(msh.topology.dim).size_local
+    n_cells_global = comm.allreduce(n_cells_local, op=MPI.SUM)
+    if comm.rank == 0:
+        print(f"  Gmsh mesh: {n_cells_global} cells  "
+              f"(h_bulk={h_bulk_nm} nm, h_gate={h_gate_nm} nm, "
+              f"refine_r={refine_radius_nm} nm, refine_d={refine_depth_nm} nm)")
+
+    return msh, 0, 0, 0
+
+
 def build_cell_fields(msh, layers, dielectric_map, rho_layers_C_m3):
     Q0 = fem.functionspace(msh, ("DG", 0))
 
@@ -339,7 +436,21 @@ def main():
                     help="Omit gate Dirichlet BC (Track A: background-only validation)")
 
     ap.add_argument("--celltype", choices=["hex", "tet"], default="tet")
-    ap.add_argument("--h_nm", type=float, default=6.0)
+    ap.add_argument("--h_nm", type=float, default=6.0,
+                    help="Uniform mesh spacing in nm (mesh_mode=uniform, default 6.0)")
+    ap.add_argument("--mesh_mode", choices=["uniform", "local_gate"], default="uniform",
+                    help="Mesh mode: 'uniform' uses create_box (current behavior); "
+                         "'local_gate' uses Gmsh with local refinement near the disk gate")
+    ap.add_argument("--h_bulk_nm", type=float, default=6.0,
+                    help="Coarse mesh size in nm away from gate (local_gate mode, default 6.0)")
+    ap.add_argument("--h_gate_nm", type=float, default=1.0,
+                    help="Fine mesh size in nm at disk gate (local_gate mode, default 1.0)")
+    ap.add_argument("--refine_radius_nm", type=float, default=30.0,
+                    help="Lateral radius of fine refinement zone in nm (local_gate mode, default 30.0)")
+    ap.add_argument("--refine_depth_nm", type=float, default=20.0,
+                    help="Depth of fine refinement zone below top surface in nm (local_gate mode, default 20.0)")
+    ap.add_argument("--disk_circle_pts", type=int, default=64,
+                    help="(Reserved for future geometry use) Points on disk circle (default 64)")
     ap.add_argument("--periodic", choices=["none", "x", "y", "xy"], default="none")
     ap.add_argument("--petsc_ksp", default="cg")
     ap.add_argument("--petsc_pc", default="hypre")
@@ -430,7 +541,16 @@ def main():
     disk_cx_m = geom.disk_cx_nm_phys * 1e-9
     disk_cy_m = geom.disk_cy_nm_phys * 1e-9
 
-    msh, Nx, Ny, Nz = make_box_mesh(comm, Lx_m, Ly_m, Lz_m, args.h_nm, args.celltype)
+    if args.mesh_mode == "uniform":
+        msh, Nx, Ny, Nz = make_box_mesh(comm, Lx_m, Ly_m, Lz_m, args.h_nm, args.celltype)
+    else:  # local_gate
+        msh, Nx, Ny, Nz = make_gmsh_mesh(
+            comm, Lx_m, Ly_m, Lz_m,
+            disk_cx_m, disk_cy_m,
+            args.h_bulk_nm, args.h_gate_nm,
+            args.refine_radius_nm, args.refine_depth_nm,
+        )
+
     eps_r_dg0, rho_dg0, mat_id_dg0, spans = build_cell_fields(msh, layers, dielectric_map, rho_layers)
     facet_tags, disk_facets, top_free_facets, bottom_facets, side_facets = locate_boundary_sets(
         msh, disk_cx_m, disk_cy_m, disk_r_m, Lz_m
@@ -538,11 +658,17 @@ def main():
             "disk_radius_nm": geom.disk_radius_nm,
             "disk_center_nm_box": [geom.disk_cx_nm_box, geom.disk_cy_nm_box],
             "disk_center_nm_phys": [geom.disk_cx_nm_phys, geom.disk_cy_nm_phys],
-            "celltype": args.celltype,
-            "h_nm": args.h_nm,
+            "mesh_mode": args.mesh_mode,
+            "celltype": args.celltype if args.mesh_mode == "uniform" else "tet",
+            "h_nm": args.h_nm if args.mesh_mode == "uniform" else None,
+            "h_bulk_nm": args.h_bulk_nm if args.mesh_mode == "local_gate" else None,
+            "h_gate_nm": args.h_gate_nm if args.mesh_mode == "local_gate" else None,
+            "refine_radius_nm": args.refine_radius_nm if args.mesh_mode == "local_gate" else None,
+            "refine_depth_nm": args.refine_depth_nm if args.mesh_mode == "local_gate" else None,
             "Nx": Nx,
             "Ny": Ny,
             "Nz": Nz,
+            "n_cells": int(msh.topology.index_map(msh.topology.dim).size_local),
             "V_gate": args.V_gate,
             "V_bottom": args.V_bottom,
             "bottom_bc_type": args.bottom_bc_type,
@@ -578,7 +704,15 @@ def main():
         with open(summary_path, "w") as f:
             f.write("=== Disk benchmark summary ===\n")
             f.write(f"basename     : {basename}\n")
-            f.write(f"mesh         : {args.celltype}, h={args.h_nm} nm -> ({Nx},{Ny},{Nz})\n")
+            if args.mesh_mode == "uniform":
+                f.write(f"mesh         : {args.celltype} uniform, h={args.h_nm} nm -> ({Nx},{Ny},{Nz})\n")
+            else:
+                n_cells_g = comm.allreduce(
+                    msh.topology.index_map(msh.topology.dim).size_local, op=MPI.SUM)
+                f.write(f"mesh         : tet local_gate (Gmsh), "
+                        f"h_bulk={args.h_bulk_nm} nm, h_gate={args.h_gate_nm} nm, "
+                        f"refine_r={args.refine_radius_nm} nm, refine_d={args.refine_depth_nm} nm, "
+                        f"n_cells={n_cells_g}\n")
             f.write(f"box [nm]     : ({geom.Lx_nm:.3f}, {geom.Ly_nm:.3f}, {Lz_m*1e9:.3f})\n")
             f.write(f"disk [nm]    : R={geom.disk_radius_nm:.3f}, center_box=({geom.disk_cx_nm_box:.3f}, {geom.disk_cy_nm_box:.3f})\n")
             f.write(f"disk [nm]    : center_phys=({geom.disk_cx_nm_phys:.3f}, {geom.disk_cy_nm_phys:.3f})\n")
@@ -601,7 +735,15 @@ def main():
 
         print("=== Disk benchmark summary ===")
         print(f"basename     : {basename}")
-        print(f"mesh         : {args.celltype}, h={args.h_nm} nm -> ({Nx},{Ny},{Nz})")
+        if args.mesh_mode == "uniform":
+            print(f"mesh         : {args.celltype} uniform, h={args.h_nm} nm -> ({Nx},{Ny},{Nz})")
+        else:
+            n_cells_g = comm.allreduce(
+                msh.topology.index_map(msh.topology.dim).size_local, op=MPI.SUM)
+            print(f"mesh         : tet local_gate (Gmsh), "
+                  f"h_bulk={args.h_bulk_nm} nm, h_gate={args.h_gate_nm} nm, "
+                  f"refine_r={args.refine_radius_nm} nm, refine_d={args.refine_depth_nm} nm, "
+                  f"n_cells={n_cells_g}")
         print(f"box [nm]     : ({geom.Lx_nm:.3f}, {geom.Ly_nm:.3f}, {Lz_m*1e9:.3f})")
         print(f"disk [nm]    : R={geom.disk_radius_nm:.3f}, center_box=({geom.disk_cx_nm_box:.3f}, {geom.disk_cy_nm_box:.3f})")
         print(f"disk [nm]    : center_phys=({geom.disk_cx_nm_phys:.3f}, {geom.disk_cy_nm_phys:.3f})")
