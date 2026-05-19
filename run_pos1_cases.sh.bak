@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
-# run_blank_cases.sh — Family 1: TRUE BLANK / NO-VOLTAGE CASES
+# run_pos1_cases.sh — Family 3: POSITIVE GATE-ACTIVE CASES
 #
-# Physics: V_gate=0, V_bottom=0, no gate Dirichlet BC, rho=0.
-# This is the trivial electrostatics baseline (phi=0 everywhere for pure Laplace).
-# Useful as a null check and reference for delta calculations.
+# Physics: V_gate=+1.0 V, V_bottom=+12.0 V, gate active, rho=0.
+# Positive polarity — useful for symmetry checks and sign-convention tests.
+#
+# Delta pairing:
+#   delta_pos = phi_pos1_p12 - phi_blank_exact
+#   (we use the TRUE BLANK as background because there is no +12V-biased no-gate
+#   case in the standard suite; see VALIDATION_LADDER_NEXT_STEPS.md)
 #
 # Cases:
-#   blank_exact_tet_h6   — 500×500×255 nm box
-#   blank_larger_tet_h6  — 800×800×255 nm box
+#   pos1_p12_exact_tet_h6   — 500×500×255 nm
+#   pos1_p12_larger_tet_h6  — 800×800×255 nm
 #
 # Usage:
 #   cd ~/Desktop/poisson_solver
-#   ./run_blank_cases.sh [exact|larger]   # default: both
+#   ./run_pos1_cases.sh [exact|larger]
 
 set -euo pipefail
 
-IMAGE="ghcr.io/fenics/dolfinx/dolfinx:stable"
+IMAGE="dolfinx/dolfinx:nightly"
 STACK="--layer_materials Si70Ge30,sSi,Si70Ge30
   --layer_heights_nm 50,5,200
   --layer_epsr 13.05,11.7,13.05
   --rho_layers_C_m3 0,0,0"
 MESH="--celltype tet --h_nm 6 --mesh_mode uniform"
-BCS="--V_gate 0.0 --V_bottom 0.0
-  --bottom_bc_type DIRICHLET --side_bc_type natural
-  --skip_disk_bc"
+BCS="--V_gate 1.0 --V_bottom 12.0
+  --bottom_bc_type DIRICHLET --side_bc_type natural"
 
 TTY_FLAGS="-i"
 if [ -t 0 ] && [ -t 1 ]; then TTY_FLAGS="-it"; fi
@@ -49,8 +52,8 @@ RUN() {
 }
 
 CASE="${1:-both}"
-[[ "$CASE" == "exact" || "$CASE" == "both" ]] && RUN "blank_exact_tet_h6"  500 500
-[[ "$CASE" == "larger" || "$CASE" == "both" ]] && RUN "blank_larger_tet_h6" 800 800
+[[ "$CASE" == "exact" || "$CASE" == "both" ]] && RUN "pos1_p12_exact_tet_h6"  500 500
+[[ "$CASE" == "larger" || "$CASE" == "both" ]] && RUN "pos1_p12_larger_tet_h6" 800 800
 
 echo ""
-echo "Done. Blank cases in results/blank_*/"
+echo "Done. Positive gate cases in results/pos1_*/"

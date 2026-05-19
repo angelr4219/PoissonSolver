@@ -51,6 +51,38 @@ def _locate_box_boundary_dofs(V, Lx, Ly, Lz, periodic: str, tol: float):
 
     return bcs
 
+import gmsh
+from mpi4py import MPI
+from dolfinx.io import gmshio
+
+gmsh.initialize()
+gmsh.model.add("local_refinement_box")
+
+# ----------------------------
+# Geometry sizes
+# ----------------------------
+Lx, Ly, Lz = 500e-9, 500e-9, 150e-9
+cx, cy, cz = 0.0, 0.0, 60e-9
+
+fine_Lx, fine_Ly, fine_Lz = 80e-9, 80e-9, 30e-9
+
+# ----------------------------
+# Large simulation box
+# ----------------------------
+box = gmsh.model.occ.addBox(
+    -Lx/2, -Ly/2, 0.0,
+    Lx, Ly, Lz
+)
+
+# Smaller box used only to define refinement region
+fine_box = gmsh.model.occ.addBox(
+    cx - fine_Lx/2,
+    cy - fine_Ly/2,
+    cz - fine_Lz/2,
+    fine_Lx,
+    fine_Ly,
+    fine_Lz
+)
 
 def solve_poisson_box(
     msh,

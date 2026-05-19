@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-IMAGE="dolfinx/dolfinx:nightly"
+IMAGE="ghcr.io/fenics/dolfinx/dolfinx:stable"
 STACK="--layer_materials Si70Ge30,sSi,Si70Ge30
   --layer_heights_nm 50,5,200
   --layer_epsr 13.05,11.7,13.05
