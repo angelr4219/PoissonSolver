@@ -33,7 +33,7 @@ docker run --rm ${TTY_FLAGS} \
   -w /app \
   "$IMAGE" \
   sh -lc 'export PYTHONPATH="/app/src:${PYTHONPATH}"; \
-          pip install -q scipy 2>/dev/null || true; \
+          pip install -q scipy h5py 2>/dev/null || true; \
           /dolfinx-env/bin/python3 -u "$@"' -- \
   MASQUE-Comparison/compare_masque.py \
     --vtk "${VTK_PATH}" \
