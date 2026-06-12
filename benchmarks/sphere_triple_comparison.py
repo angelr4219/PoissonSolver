@@ -159,7 +159,7 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
     ksp.setOperators(A)
 
     phi = Function(V, name="phi_dirichlet")
-    ksp.solve(b, phi.vector)
+    ksp.solve(b, phi.x.petsc_vec)
     phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
@@ -257,7 +257,7 @@ def run_periodic(h_nm: float, out_dir: Path) -> dict:
     ksp.setTolerances(rtol=1e-10)
     ksp.setFromOptions()
     ksp.setOperators(A)
-    ksp.solve(b, phi.vector)
+    ksp.solve(b, phi.x.petsc_vec)
     phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
