@@ -36,6 +36,11 @@ make test                # runs both test-2d and test-3d
 make test-2d             # ./run_dolfinx.sh tests/test_mms_2d.py
 make test-3d             # ./run_dolfinx.sh tests/test_mms_3d.py
 
+# Triple-method sphere benchmark (FEM-Dirichlet / FEM-Periodic / FFT)
+./benchmarks/run_sphere_benchmark.sh
+./benchmarks/run_sphere_benchmark.sh --skip-per          # skip if dolfinx_mpc absent
+./run_dolfinx.sh python3 benchmarks/sphere_triple_comparison.py --help
+
 # Clean outputs
 make clean               # remove results/*.xdmf and *.h5
 make really-clean        # also remove __pycache__, .pytest_cache, .ruff_cache, build
@@ -47,12 +52,22 @@ Tests exit with code 0 on pass, 1 on failure. They are standalone scripts (not c
 
 ```
 src/poisson/      Core solver library (installable package)
+  fem_solve.py    Low-level FEM assembly (exposes KSP object)
+  fft_solve.py    Spectral Poisson solver on uniform periodic grids
+  geom_sphere.py  sphere_refined_box / sphere_in_box (gmsh, nm units)
+  refinement.py   RefinementBox + build_refined_mesh_3d (gmsh Box field)
+  analytics.py    Analytic solutions: image charge, conducting sphere, Coulomb
+  charges.py      Gaussian charge density (2D/3D)
+  materials.py    piecewise_eps_DG0_2regions
 main/             Driver and MMS test suite
   main.py         CLI entry point (-m src.main via Makefile)
   Solver/         solve_dirichlet, solve_mixed, norms
   Geometry/       unit_square, unit_cube, disk_in_box
   physics/        dg0_from_indicator (DG0 permittivity)
   tests/          test_mms_2d.py, test_mms_3d.py
+benchmarks/       Multi-method benchmarks
+  sphere_triple_comparison.py  FEM-Dir vs FEM-Per vs FFT on sphere geometry
+  run_sphere_benchmark.sh      Docker wrapper for the above
 src/verify/       Standalone verification benchmarks
 PC/               Point-charge problem scripts
 scripts/          Utility/sweep shell scripts
@@ -95,11 +110,21 @@ BCs are composed manually before calling the solver:
 - **Dirichlet**: `fem.dirichletbc` on DOFs located with `fem.locate_dofs_topological`
 - **Neumann**: passed as `neumann_terms=[(g_expr, facet_tag)]` to `solve_mixed`; requires a `meshtags` object on facets
 
+### FFT Solver
+
+`src/poisson/fft_solve.py` provides a spectral Poisson solver for uniform periodic grids:
+- `fft_poisson_3d(rho_grid, L_m, eps_r)` — solves −ε₀εᵣ∇²φ = ρ via FFT in O(N³ log N).
+- `gaussian_rho_grid` / `sphere_charge_shell_grid` — build source arrays on the grid.
+- Requires cubic grids; uniform permittivity only; periodic BCs on all faces.
+- k=0 mode forced to zero (zero-mean gauge; equivalent to a neutralising background).
+- Memory: N³ float64 arrays. Use `max_n_for_memory()` to find safe N for a given RAM budget.
+
 ### Mesh Generation
 
-Two approaches coexist:
+Three approaches coexist:
 1. **dolfinx built-in**: `unit_square`, `unit_cube`, `disk_in_box` in `main/Geometry/geometry.py` — used for MMS tests and standard cases.
-2. **Gmsh**: `build_refined_mesh_3d` in `src/poisson/refinement.py` — used when local mesh refinement is needed. `RefinementBox` dataclass defines axis-aligned refinement regions; multiple boxes combine via Gmsh's `Min` field.
+2. **Gmsh box fields**: `build_refined_mesh_3d` in `src/poisson/refinement.py` — axis-aligned `RefinementBox` regions; multiple boxes combine via Gmsh's `Min` field.
+3. **Gmsh sphere geometry**: `sphere_refined_box` and `sphere_in_box` in `src/poisson/geom_sphere.py` — use a Gmsh `Ball` field for spherical refinement zones (nm units); `sphere_in_box` cuts a spherical void for conducting-sphere problems (facet tag 2 = sphere surface, tag 1 = outer box).
 
 ### Output Format
 
