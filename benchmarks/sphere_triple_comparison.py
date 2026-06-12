@@ -106,7 +106,10 @@ def fem_errors(phi_h, phi_exact_expr, domain, V):
 
 def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
     from dolfinx import fem, default_scalar_type
-    from dolfinx.fem.petsc import LinearProblem
+    try:
+        from dolfinx.fem.petsc import LinearProblem
+    except ImportError:
+        from dolfinx.fem import LinearProblem
     from dolfinx.io import XDMFFile
     import ufl
 

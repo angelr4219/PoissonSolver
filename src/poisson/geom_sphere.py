@@ -33,9 +33,12 @@ def sphere_refined_box(
     """
     try:
         import gmsh
-        from dolfinx.io import gmshio
     except ImportError as e:
-        raise RuntimeError("gmsh and dolfinx.io.gmshio are required") from e
+        raise RuntimeError("gmsh is required: pip install gmsh") from e
+    try:
+        from dolfinx.io import gmshio
+    except ImportError:
+        from dolfinx.io import gmsh as gmshio  # older dolfinx builds
 
     L = _nm(box_nm)
     R = _nm(sphere_r_nm)
@@ -70,7 +73,8 @@ def sphere_refined_box(
         if msh_path is not None:
             gmsh.write(str(msh_path))
 
-    msh, cell_tags, facet_tags = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
+    result = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
+    msh, cell_tags, facet_tags = result[0], result[1], result[2]
 
     if comm.rank == 0:
         gmsh.finalize()
@@ -96,9 +100,12 @@ def sphere_in_box(
     """
     try:
         import gmsh
-        from dolfinx.io import gmshio
     except ImportError as e:
-        raise RuntimeError("gmsh and dolfinx.io.gmshio are required") from e
+        raise RuntimeError("gmsh is required: pip install gmsh") from e
+    try:
+        from dolfinx.io import gmshio
+    except ImportError:
+        from dolfinx.io import gmsh as gmshio
 
     L = _nm(box_nm)
     R = _nm(sphere_r_nm)
@@ -146,7 +153,8 @@ def sphere_in_box(
         if msh_path is not None:
             gmsh.write(str(msh_path))
 
-    msh, cell_tags, facet_tags = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
+    result = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
+    msh, cell_tags, facet_tags = result[0], result[1], result[2]
 
     if comm.rank == 0:
         gmsh.finalize()
