@@ -106,11 +106,9 @@ def fem_errors(phi_h, phi_exact_expr, domain, V):
 
 def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
     from dolfinx import fem, default_scalar_type
-    try:
-        from dolfinx.fem.petsc import LinearProblem
-    except ImportError:
-        from dolfinx.fem import LinearProblem
     from dolfinx.io import XDMFFile
+    from dolfinx.fem.petsc import assemble_matrix, assemble_vector, apply_lifting, set_bc
+    from petsc4py import PETSc
     import ufl
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -127,7 +125,7 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
         h_far_nm=h_far_nm,
     )
 
-    from dolfinx.fem import functionspace, Function, Constant, dirichletbc, locate_dofs_topological
+    from dolfinx.fem import functionspace, Function, form, dirichletbc, locate_dofs_topological
     V = functionspace(msh, ("Lagrange", 1))
 
     # phi = 0 on all box walls (facet tag 1)
@@ -136,7 +134,7 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
                                         facet_tags.find(1))
     bc = dirichletbc(default_scalar_type(0.0), wall_dofs, V)
 
-    # Point charge source term approximated as a narrow Gaussian
+    # Point charge source term as a narrow Gaussian
     sigma = max(h_nm * 0.5, 0.1) * 1e-9
     x = ufl.SpatialCoordinate(msh)
     r2 = x[0]**2 + x[1]**2 + x[2]**2
@@ -144,14 +142,25 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
 
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    a = EPS0 * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
-    L = rho_expr * v * ufl.dx
+    a_form = form(EPS0 * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx)
+    L_form = form(rho_expr * v * ufl.dx)
+
+    A = assemble_matrix(a_form, bcs=[bc]); A.assemble()
+    b = assemble_vector(L_form)
+    apply_lifting(b, [a_form], bcs=[[bc]])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    set_bc(b, [bc])
+
+    ksp = PETSc.KSP().create(msh.comm)
+    ksp.setType("cg")
+    ksp.getPC().setType("hypre")
+    ksp.setTolerances(rtol=1e-10)
+    ksp.setFromOptions()
+    ksp.setOperators(A)
 
     phi = Function(V, name="phi_dirichlet")
-    problem = LinearProblem(a, L, bcs=[bc], u=phi,
-                            petsc_options={"ksp_type": "cg", "pc_type": "hypre",
-                                           "ksp_rtol": 1e-10})
-    phi = problem.solve()
+    ksp.solve(b, phi.vector)
+    phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
     # Analytic for error
@@ -180,6 +189,8 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
 def run_periodic(h_nm: float, out_dir: Path) -> dict:
     from dolfinx import fem, default_scalar_type
     from dolfinx.io import XDMFFile
+    from dolfinx.fem.petsc import assemble_matrix, assemble_vector, apply_lifting, set_bc
+    from petsc4py import PETSc
     import ufl
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -231,15 +242,23 @@ def run_periodic(h_nm: float, out_dir: Path) -> dict:
 
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    a = EPS0 * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
-    L_form = rho_expr * v * ufl.dx
+    a_ufl = EPS0 * ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+    L_ufl = rho_expr * v * ufl.dx
 
     phi = Function(mpc.function_space, name="phi_periodic")
-    problem = dolfinx_mpc.LinearProblem(a, L_form, mpc, bcs=[], u=phi,
-                                         petsc_options={"ksp_type": "cg",
-                                                        "pc_type": "hypre",
-                                                        "ksp_rtol": 1e-10})
-    phi = problem.solve()
+    A = dolfinx_mpc.assemble_matrix(fem.form(a_ufl), mpc)
+    A.assemble()
+    b = dolfinx_mpc.assemble_vector(fem.form(L_ufl), mpc)
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+
+    ksp = PETSc.KSP().create(msh.comm)
+    ksp.setType("cg")
+    ksp.getPC().setType("hypre")
+    ksp.setTolerances(rtol=1e-10)
+    ksp.setFromOptions()
+    ksp.setOperators(A)
+    ksp.solve(b, phi.vector)
+    phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
     phi_ref = Function(V, name="phi_analytic")
