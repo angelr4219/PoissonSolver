@@ -26,3 +26,4 @@ tmp/
 *.vtu
 *.vtk
 *.msh
+benchmark_results/
