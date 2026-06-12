@@ -58,7 +58,7 @@ BOX_SI = BOX_NM * 1e-9
 H_LEVELS_NM = [50.0, 25.0, 10.0, 5.0, 1.0, 0.1]
 
 # For very fine h, FEM becomes impractical — skip FEM below this threshold
-FEM_MIN_H_NM = 1.0
+FEM_MIN_H_NM = 5.0  # skip FEM for h < this (too many DOFs / too slow)
 
 OUT_DIR = Path("benchmark_results")
 
@@ -79,25 +79,31 @@ def phi_analytic_pts(pts: np.ndarray) -> np.ndarray:
 # Metric helpers
 # ---------------------------------------------------------------------------
 
-def fem_errors(phi_h, phi_exact_expr, domain, V):
-    """Compute L2 and H1 errors for a FEM solution against a UFL expression."""
-    import ufl
-    from dolfinx import fem
+def fem_errors(phi_h, V):
+    """
+    Compute errors for a FEM solution vs the analytic conducting-sphere potential.
 
-    e = phi_h - phi_exact_expr
-    L2_sq = fem.assemble_scalar(fem.form(ufl.inner(e, e) * ufl.dx))
-    H1_sq = fem.assemble_scalar(fem.form(ufl.inner(ufl.grad(e), ufl.grad(e)) * ufl.dx))
-    L2 = float(COMM.allreduce(L2_sq, op=MPI.SUM)) ** 0.5
-    H1 = float(COMM.allreduce(H1_sq, op=MPI.SUM)) ** 0.5
+    Uses DOF coordinates directly (robust across all dolfinx versions).
+    Returns (L2_rms, H1_seminorm, max_err) all in Volts.
+    H1 is approximated as nan (requires UFL grad which varies by dolfinx version).
+    """
+    dof_coords = V.tabulate_dof_coordinates()   # (Ndof, 3)
+    phi_num    = phi_h.x.array.real             # local DOF values
 
-    pts = domain.geometry.x
-    phi_num = phi_h.x.array
-    # Interpolate analytic at mesh nodes
-    phi_ref = phi_analytic_pts(pts)
-    # Only local dofs — approximate pointwise error
-    max_err = float(np.max(np.abs(phi_num - phi_ref[:phi_num.size])))
-    max_err = COMM.allreduce(max_err, op=MPI.MAX)
-    return L2, H1, max_err
+    phi_ref = phi_analytic_pts(dof_coords[:len(phi_num)])
+
+    diff = phi_num - phi_ref
+    # Gather global stats
+    local_ss  = float(np.sum(diff**2))
+    local_n   = float(len(diff))
+    local_max = float(np.max(np.abs(diff))) if len(diff) else 0.0
+
+    global_ss  = COMM.allreduce(local_ss,  op=MPI.SUM)
+    global_n   = COMM.allreduce(local_n,   op=MPI.SUM)
+    max_err    = COMM.allreduce(local_max,  op=MPI.MAX)
+
+    L2_rms = float(np.sqrt(global_ss / global_n))  # RMS over DOFs
+    return L2_rms, float("nan"), max_err
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +169,7 @@ def run_dirichlet(h_nm: float, out_dir: Path) -> dict:
     phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
-    # Analytic for error
-    from dolfinx.fem import Expression
-    phi_ref = Function(V, name="phi_analytic")
-    pts = V.tabulate_dof_coordinates()
-    phi_ref.x.array[:] = phi_analytic_pts(pts)
-
-    L2, H1, max_err = fem_errors(phi, phi_ref, msh, V)
+    L2, H1, max_err = fem_errors(phi, V)
     ndof = V.dofmap.index_map.size_global * V.dofmap.index_map_bs
 
     # Write XDMF
@@ -261,11 +261,7 @@ def run_periodic(h_nm: float, out_dir: Path) -> dict:
     phi.x.scatter_forward()
     t_solve = time.perf_counter() - t0
 
-    phi_ref = Function(V, name="phi_analytic")
-    pts = V.tabulate_dof_coordinates()
-    phi_ref.x.array[:] = phi_analytic_pts(pts)
-
-    L2, H1, max_err = fem_errors(phi, phi_ref, msh, V)
+    L2, H1, max_err = fem_errors(phi, V)
     ndof = V.dofmap.index_map.size_global * V.dofmap.index_map_bs
 
     xdmf_path = out_dir / f"phi_per_h{h_nm}nm.xdmf"
