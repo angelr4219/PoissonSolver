@@ -256,6 +256,67 @@ def run_periodic(h_nm: float, out_dir: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# HDF5 + XDMF writer for FFT uniform-grid output
+# ---------------------------------------------------------------------------
+
+def _write_fft_xdmf(phi: np.ndarray, phi_ref: np.ndarray, xyz: np.ndarray,
+                    dx: float, stem: Path) -> None:
+    """
+    Write phi and phi_ref on a uniform 3-D Cartesian grid to:
+      <stem>.h5   -- datasets: /phi, /phi_ref, /xyz
+      <stem>.xdmf -- XDMF2 descriptor readable by ParaView / VisIt
+
+    The XDMF uses a 3DCoRectMesh (uniform rectilinear grid) so ParaView
+    opens it identically to the FEM XDMF files.
+    """
+    import h5py
+
+    h5_path = Path(str(stem) + ".h5")
+    xdmf_path = Path(str(stem) + ".xdmf")
+
+    N = phi.shape[0]
+    origin = float(xyz[0])
+    spacing = dx  # metres
+
+    with h5py.File(h5_path, "w") as f:
+        f.create_dataset("phi",     data=phi.astype(np.float64),     compression="gzip")
+        f.create_dataset("phi_ref", data=phi_ref.astype(np.float64), compression="gzip")
+        f.create_dataset("xyz",     data=xyz.astype(np.float64))
+        f.attrs["origin_m"]  = origin
+        f.attrs["spacing_m"] = spacing
+        f.attrs["N"]         = N
+
+    h5_name = h5_path.name
+    n_nodes = N ** 3
+    xdmf_txt = f"""\
+<?xml version="1.0" ?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="2.0">
+  <Domain>
+    <Grid Name="FFT_phi" GridType="Uniform">
+      <Topology TopologyType="3DCoRectMesh" Dimensions="{N} {N} {N}"/>
+      <Geometry GeometryType="ORIGIN_DXDYDZ">
+        <DataItem Format="XML" Dimensions="3">{origin} {origin} {origin}</DataItem>
+        <DataItem Format="XML" Dimensions="3">{spacing} {spacing} {spacing}</DataItem>
+      </Geometry>
+      <Attribute Name="phi" AttributeType="Scalar" Center="Node">
+        <DataItem Format="HDF" Dimensions="{N} {N} {N}" NumberType="Float" Precision="8">
+          {h5_name}:/phi
+        </DataItem>
+      </Attribute>
+      <Attribute Name="phi_ref" AttributeType="Scalar" Center="Node">
+        <DataItem Format="HDF" Dimensions="{N} {N} {N}" NumberType="Float" Precision="8">
+          {h5_name}:/phi_ref
+        </DataItem>
+      </Attribute>
+    </Grid>
+  </Domain>
+</Xdmf>
+"""
+    xdmf_path.write_text(xdmf_txt)
+
+
+# ---------------------------------------------------------------------------
 # Method 3: FFT
 # ---------------------------------------------------------------------------
 
@@ -290,8 +351,7 @@ def run_fft(h_nm: float, out_dir: Path) -> dict:
     L2 = float(np.sqrt(np.mean(diff**2)))
     max_err = float(np.max(np.abs(diff)))
 
-    npz_path = out_dir / f"phi_fft_h{h_nm}nm.npz"
-    np.savez_compressed(str(npz_path), phi=phi_num, phi_ref=phi_ref, xyz=xyz)
+    _write_fft_xdmf(phi_num, phi_ref, xyz, dx, out_dir / f"phi_fft_h{h_nm}nm")
 
     return {"method": "FFT", "h_nm": h_nm, "ndof": N**3,
             "L2_err": L2, "H1_err": float("nan"), "max_err": max_err,

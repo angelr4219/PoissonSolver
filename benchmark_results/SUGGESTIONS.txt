@@ -1,0 +1,42 @@
+SUGGESTIONS FOR IMPROVING ACCURACY (towards MASQUE-level comparison)
+=====================================================================
+
+1. FAR-FIELD BOUNDARY CONDITION (FEM-Dirichlet)
+   Use the exact Coulomb far-field  phi = Q/(4*pi*eps0*r)  on the box walls
+   instead of phi=0.  This eliminates domain-truncation error, which dominates
+   at coarse h when the box is not large enough.
+
+2. WIGNER-SEITZ / MADELUNG CORRECTION (FEM-Periodic)
+   A periodic array of charges introduces a Madelung self-energy.  Apply the
+   neutralising background correction  rho -= rho.mean()  and document that
+   the result converges to the isolated-sphere limit only as box/R -> inf.
+
+3. HIGHER-ORDER ELEMENTS
+   Switch from P1 to P2 Lagrange elements.  Convergence improves from O(h^2)
+   to O(h^4) in L2, halving the required mesh density for the same accuracy.
+
+4. CAPACITANCE EXTRACTION
+   Compute C = Q / phi_surface via a surface-flux integral
+       C = -eps0 * integral(grad(phi).n dS) / phi_sphere
+   This is the quantity MASQUE compares against analytic C = 4*pi*eps0*R.
+
+5. MULTI-DIELECTRIC GEOMETRY
+   The FFT solver assumes constant eps.  For real gate stacks (SiGe/oxide/gate)
+   use only FEM.  Add a material tag layer to the sphere benchmark to test
+   this code path.
+
+6. SOLVER SCALABILITY
+   For DOF counts > 1M, switch from CG+Hypre to MUMPS direct solver
+   (PETSc option: -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps).
+   This avoids iterative convergence issues on ill-conditioned periodic systems.
+
+7. FFT SMEARING ARTEFACT
+   The Gaussian charge shell introduces a smearing error proportional to sigma.
+   Deconvolve in k-space:  phi_hat_corrected = phi_hat / G_hat  where G_hat is
+   the Fourier transform of the Gaussian.  This recovers the point-charge limit
+   without requiring sigma -> 0.
+
+8. COMPARISON METRIC
+   Report relative error at r = 2R (outside sphere, away from singularity) in
+   addition to global L2.  MASQUE benchmarks often quote pointwise error at
+   specific probe points rather than global norms.
