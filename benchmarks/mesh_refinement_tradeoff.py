@@ -138,19 +138,25 @@ def solve_point_charge(domain, q, x0_m, sigma_m, eps_r):
 
 
 def eval_at_points(domain, uh, pts_m):
+    """Evaluate uh at each point in pts_m. Each point's owning cell lives on
+    exactly one MPI rank (or none, if outside the mesh); ranks that don't own
+    it locally report NaN, and an Allreduce(MIN) combines the one real value
+    per point across ranks -- needed for correctness under DOLFINX_NP>1,
+    where compute_colliding_cells only finds locally-owned/ghost cells."""
     from dolfinx.geometry import bb_tree, compute_collisions_points, compute_colliding_cells
     tree = bb_tree(domain, domain.topology.dim)
     colls = compute_collisions_points(tree, pts_m)
     cells = compute_colliding_cells(domain, colls, pts_m)
-    vals = []
+    local_vals = np.full(len(pts_m), np.nan)
     for i, pt in enumerate(pts_m):
         cell_list = cells.links(i)
         if len(cell_list) > 0:
-            v = float(np.asarray(uh.eval(pt.reshape(1, -1), cell_list[:1])).reshape(-1)[0])
-        else:
-            v = float("nan")
-        vals.append(v)
-    return np.array(vals)
+            local_vals[i] = float(np.asarray(uh.eval(pt.reshape(1, -1), cell_list[:1])).reshape(-1)[0])
+    sendbuf = np.where(np.isnan(local_vals), np.inf, local_vals)
+    global_vals = np.empty_like(sendbuf)
+    domain.comm.Allreduce(sendbuf, global_vals, op=MPI.MIN)
+    global_vals[np.isinf(global_vals)] = np.nan
+    return global_vals
 
 
 def n_cells_global(domain):
@@ -173,11 +179,12 @@ def run_config(name, domain, q, x0_m, sigma_m, eps_r, probe_pts_m, probe_r_m, ou
     phi_ex = phi_point_charge(probe_r_m, q, eps_r)
     rel_err = np.abs(phi_h - phi_ex) / np.abs(phi_ex)
 
-    if IS_ROOT:
-        xdmf_path = os.path.join(outdir, f"{name}.xdmf")
-        with XDMFFile(COMM, xdmf_path, "w") as f:
-            f.write_mesh(domain)
-            f.write_function(uh)
+    # XDMF/HDF5 writes are collective MPI-IO calls -- every rank must take
+    # part (gating this behind IS_ROOT deadlocks/corrupts under DOLFINX_NP>1).
+    xdmf_path = os.path.join(outdir, f"{name}.xdmf")
+    with XDMFFile(COMM, xdmf_path, "w") as f:
+        f.write_mesh(domain)
+        f.write_function(uh)
 
     return dict(name=name, n_cells=n_cells, n_dofs=n_dofs,
                 t_solve=t_solve, phi_h=phi_h, phi_ex=phi_ex, rel_err=rel_err,
@@ -200,6 +207,12 @@ def build_parser():
     p.add_argument("--probe-r-nm", type=float, nargs="+", default=[5.0, 10.0, 15.0],
                    help="Probe radii from the charge [nm], along +x, inside Q4")
     p.add_argument("--outdir", default="results/mesh_refinement", help="Output directory")
+    p.add_argument("--only", choices=["uniform_coarse", "uniform_fine", "quadrant_mixed"],
+                   default=None,
+                   help="Run only this one config (writes a per-config CSV row to "
+                        "<outdir>/<name>_result.csv instead of the merged report). "
+                        "Lets independent configs run concurrently as separate "
+                        "processes -- see benchmarks/run_mesh_refinement_parallel.sh.")
     return p
 
 
@@ -227,46 +240,55 @@ def main():
     ) * 1e-9
     probe_r_m = np.array(args.probe_r_nm, dtype=float) * 1e-9
 
+    config_specs = [
+        ("uniform_coarse",
+         lambda: build_uniform_mesh(L_m, args.h_coarse_nm * 1e-9),
+         f"{args.h_coarse_nm:.1f}nm uniform"),
+        ("uniform_fine",
+         lambda: build_uniform_mesh(L_m, args.h_fine_nm * 1e-9),
+         f"{args.h_fine_nm:.1f}nm uniform"),
+        ("quadrant_mixed",
+         lambda: build_quadrant_mesh(L_m, args.h_q1_nm * 1e-9, args.h_q2_nm * 1e-9,
+                                      args.h_q3_nm * 1e-9, args.h_q4_nm * 1e-9),
+         f"Q1={args.h_q1_nm:.0f}/Q2={args.h_q2_nm:.0f}/Q3={args.h_q3_nm:.0f}/Q4={args.h_q4_nm:.0f}nm"),
+    ]
+    if args.only is not None:
+        config_specs = [c for c in config_specs if c[0] == args.only]
+
     results = []
-
-    _log("\n-- uniform_coarse --")
-    t0 = time.perf_counter()
-    dom_c = build_uniform_mesh(L_m, args.h_coarse_nm * 1e-9)
-    t_mesh_c = time.perf_counter() - t0
-    res_c = run_config("uniform_coarse", dom_c, q, x0_m, sigma_m, eps_r, probe_pts_m, probe_r_m, args.outdir)
-    res_c["t_mesh"] = t_mesh_c
-    res_c["h_label"] = f"{args.h_coarse_nm:.1f}nm uniform"
-    results.append(res_c)
-    _log(f"  n_cells={res_c['n_cells']:>10,}  n_dofs={res_c['n_dofs']:>10,}  "
-         f"t_mesh={t_mesh_c:6.2f}s  t_solve={res_c['t_solve']:6.2f}s  "
-         f"max_rel_err={res_c['max_rel_err']:.3e}")
-
-    _log("\n-- uniform_fine --")
-    t0 = time.perf_counter()
-    dom_f = build_uniform_mesh(L_m, args.h_fine_nm * 1e-9)
-    t_mesh_f = time.perf_counter() - t0
-    res_f = run_config("uniform_fine", dom_f, q, x0_m, sigma_m, eps_r, probe_pts_m, probe_r_m, args.outdir)
-    res_f["t_mesh"] = t_mesh_f
-    res_f["h_label"] = f"{args.h_fine_nm:.1f}nm uniform"
-    results.append(res_f)
-    _log(f"  n_cells={res_f['n_cells']:>10,}  n_dofs={res_f['n_dofs']:>10,}  "
-         f"t_mesh={t_mesh_f:6.2f}s  t_solve={res_f['t_solve']:6.2f}s  "
-         f"max_rel_err={res_f['max_rel_err']:.3e}")
-
-    _log("\n-- quadrant_mixed --")
-    t0 = time.perf_counter()
-    dom_q = build_quadrant_mesh(L_m, args.h_q1_nm * 1e-9, args.h_q2_nm * 1e-9,
-                                  args.h_q3_nm * 1e-9, args.h_q4_nm * 1e-9)
-    t_mesh_q = time.perf_counter() - t0
-    res_q = run_config("quadrant_mixed", dom_q, q, x0_m, sigma_m, eps_r, probe_pts_m, probe_r_m, args.outdir)
-    res_q["t_mesh"] = t_mesh_q
-    res_q["h_label"] = f"Q1={args.h_q1_nm:.0f}/Q2={args.h_q2_nm:.0f}/Q3={args.h_q3_nm:.0f}/Q4={args.h_q4_nm:.0f}nm"
-    results.append(res_q)
-    _log(f"  n_cells={res_q['n_cells']:>10,}  n_dofs={res_q['n_dofs']:>10,}  "
-         f"t_mesh={t_mesh_q:6.2f}s  t_solve={res_q['t_solve']:6.2f}s  "
-         f"max_rel_err={res_q['max_rel_err']:.3e}")
+    for name, build_mesh, h_label in config_specs:
+        _log(f"\n-- {name} --")
+        t0 = time.perf_counter()
+        domain = build_mesh()
+        t_mesh = time.perf_counter() - t0
+        res = run_config(name, domain, q, x0_m, sigma_m, eps_r, probe_pts_m, probe_r_m, args.outdir)
+        res["t_mesh"] = t_mesh
+        res["h_label"] = h_label
+        results.append(res)
+        _log(f"  n_cells={res['n_cells']:>10,}  n_dofs={res['n_dofs']:>10,}  "
+             f"t_mesh={t_mesh:6.2f}s  t_solve={res['t_solve']:6.2f}s  "
+             f"max_rel_err={res['max_rel_err']:.3e}")
 
     if not IS_ROOT:
+        return
+
+    if args.only is not None:
+        # Single-config mode: dump this config's full result as JSON so a
+        # separate merge step (benchmarks/merge_tradeoff_results.py) can
+        # combine several of these -- one per concurrently-run process --
+        # into the same report.txt/tradeoff_results.csv format produced by
+        # a full sequential run.
+        import json
+        r = results[0]
+        r["t_total"] = r["t_mesh"] + r["t_solve"]
+        r["probe_r_nm"] = list(args.probe_r_nm)
+        r["phi_h"] = [float(v) for v in r["phi_h"]]
+        r["phi_ex"] = [float(v) for v in r["phi_ex"]]
+        r["rel_err"] = [float(v) for v in r["rel_err"]]
+        json_path = os.path.join(args.outdir, f"{r['name']}_result.json")
+        with open(json_path, "w") as f:
+            json.dump(r, f, indent=2)
+        print(f"\n[--only {args.only}] result written to {json_path}")
         return
 
     csv_path = os.path.join(args.outdir, "tradeoff_results.csv")

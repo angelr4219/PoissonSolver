@@ -1,0 +1,34 @@
+==============================================================================
+MESH-REFINEMENT TRADEOFF -- uniform-coarse vs uniform-fine vs 4-quadrant
+(merged from concurrent --only runs)
+==============================================================================
+
+------------------------------------------------------------------------------
+config          mesh                       n_cells    n_dofs  t_mesh[s]  t_solve[s]  max_relerr  mean_relerr
+----------------------------------------------------------------------------------------------------
+uniform_coarse  20.0nm uniform                 384       125       0.00        0.79   9.676e-01    9.641e-01
+uniform_fine    1.0nm uniform            3,072,000   531,441       6.25       11.12   6.355e-01    4.003e-01
+quadrant_mixed  Q1=20/Q2=10/Q3=5/Q4=1nm    577,618    98,124      21.16        4.82   6.371e-01    4.079e-01
+
+  Raw phi at each probe point (FEM vs analytic), per config:
+  [uniform_coarse  (20.0nm uniform)]
+      r=   5.0nm   phi_FEM= 9.316628e-03 V   phi_exact= 2.879929e-01 V   rel_err=9.676e-01
+      r=  10.0nm   phi_FEM= 6.211085e-03 V   phi_exact= 1.439965e-01 V   rel_err=9.569e-01
+      r=  15.0nm   phi_FEM= 3.105543e-03 V   phi_exact= 9.599764e-02 V   rel_err=9.676e-01
+  [uniform_fine  (1.0nm uniform)]
+      r=   5.0nm   phi_FEM= 2.340472e-01 V   phi_exact= 2.879929e-01 V   rel_err=1.873e-01
+      r=  10.0nm   phi_FEM= 8.953456e-02 V   phi_exact= 1.439965e-01 V   rel_err=3.782e-01
+      r=  15.0nm   phi_FEM= 3.499292e-02 V   phi_exact= 9.599764e-02 V   rel_err=6.355e-01
+  [quadrant_mixed  (Q1=20/Q2=10/Q3=5/Q4=1nm)]
+      r=   5.0nm   phi_FEM= 2.322257e-01 V   phi_exact= 2.879929e-01 V   rel_err=1.936e-01
+      r=  10.0nm   phi_FEM= 8.738874e-02 V   phi_exact= 1.439965e-01 V   rel_err=3.931e-01
+      r=  15.0nm   phi_FEM= 3.484003e-02 V   phi_exact= 9.599764e-02 V   rel_err=6.371e-01
+
+------------------------------------------------------------------------------
+TRADEOFF SUMMARY
+------------------------------------------------------------------------------
+  uniform_fine total time   = 17.38s (531,441 dofs, max_rel_err=6.355e-01)
+  quadrant_mixed total time = 25.97s (98,124 dofs, max_rel_err=6.371e-01)
+  uniform_coarse total time = 0.79s (125 dofs, max_rel_err=9.676e-01)
+  -> quadrant_mixed uses 5.4x fewer DOFs than uniform_fine, runs 0.7x slower, for comparable near-charge accuracy.
+==============================================================================

@@ -1,0 +1,46 @@
+Exact commands used to produce every result in this folder
+=============================================================
+
+Both parallelism mechanisms were added to the repo this session:
+
+  1. MPI ranks within ONE dolfinx solve (run_dolfinx.sh's new DOLFINX_NP
+     env var -- see the repo-root run_dolfinx.sh diff).
+  2. Concurrent execution of independent mesh_refinement_tradeoff.py
+     configs as separate docker-run processes (the new --only flag on
+     that script + benchmarks/run_mesh_refinement_parallel.sh +
+     benchmarks/merge_tradeoff_results.py).
+
+1. MPI-ranks-per-solve benchmark (mpi_speedup_results.csv)
+-----------------------------------------------------------
+Same single config (uniform_fine, h=1nm, 531,441 dofs -- the heaviest of
+the 3 mesh_refinement_tradeoff.py configs) run twice, once at 1 rank and
+once at 4 ranks (this sandbox has 4 CPU cores):
+
+  rm -rf results/mpi_np_test
+  DOLFINX_NP=1 ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py \
+      --only uniform_fine --outdir results/mpi_np_test
+  DOLFINX_NP=4 ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py \
+      --only uniform_fine --outdir results/mpi_np_test
+
+Both wrapped in `time` for the wall-clock numbers in the CSV.
+
+2. Concurrent independent configs (concurrent_configs_report.txt/.csv)
+-----------------------------------------------------------
+All 3 mesh_refinement_tradeoff.py configs (uniform_coarse, uniform_fine,
+quadrant_mixed), same defaults as mesh_refinement_tradeoff/RUN_COMMANDS.txt,
+but launched as 3 separate ./run_dolfinx.sh (docker run) background
+processes instead of one sequential process, then merged:
+
+  time ./benchmarks/run_mesh_refinement_parallel.sh
+
+(equivalent, written out, to what the script does internally:)
+  ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py --only uniform_coarse  --outdir results/mesh_refinement_parallel &
+  ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py --only uniform_fine    --outdir results/mesh_refinement_parallel &
+  ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py --only quadrant_mixed  --outdir results/mesh_refinement_parallel &
+  wait
+  python3 benchmarks/merge_tradeoff_results.py results/mesh_refinement_parallel
+
+All defaults (--L-nm 80, --h-coarse-nm 20, --h-fine-nm 1, --h-q1..q4-nm
+20/10/5/1, same point charge/probe points as mesh_refinement_tradeoff/) --
+identical physical problem to the original sequential run, only the
+execution strategy differs.

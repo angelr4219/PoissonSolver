@@ -14,6 +14,18 @@ This mounts `$PWD` as `/app` inside `dolfinx/dolfinx:nightly`, sets `PYTHONPATH=
 
 **Do not prefix the script with a literal `python3`** (i.e. do not call `./run_dolfinx.sh python3 script.py`) — `run_dolfinx.sh`'s internal `sh -lc '...' -- "$@"` causes the shell's positional-parameter handling to swallow that token, and the container's python3 ends up trying to open a file literally named `python3`, failing with `can't open file '/app/python3'`. Always call it as `./run_dolfinx.sh script.py [args]`, matching how the `Makefile` already invokes it.
 
+### Parallelism
+
+`run_dolfinx.sh` supports an optional `DOLFINX_NP` env var to run a single script under MPI (the image ships MPICH; `mpirun` needs no `--allow-run-as-root`-style flag, unlike OpenMPI):
+
+```bash
+DOLFINX_NP=4 ./run_dolfinx.sh <script.py> [args]   # 4 MPI ranks; default is 1 (no mpirun wrapper)
+```
+
+dolfinx code that writes XDMF/HDF5 or evaluates fields at points must do so on **all ranks**, not just rank 0 — XDMFFile I/O is collective MPI-IO, and `compute_colliding_cells` only finds points in cells local to each rank's partition (combine per-rank results with an MPI reduce, e.g. `Allreduce(..., op=MPI.MIN)` on a NaN-sentineled array). See `benchmarks/mesh_refinement_tradeoff.py`'s `run_config`/`eval_at_points` for the working pattern — both bugs were hit and fixed there.
+
+For sweeps over several *independent* configs (e.g. a mesh-size sweep), prefer running them as separate `./run_dolfinx.sh` processes concurrently rather than threads in one process — gmsh and PETSc keep non-thread-safe global C state. `benchmarks/mesh_refinement_tradeoff.py --only <config_name>` runs just one config and dumps its result as JSON; `benchmarks/run_mesh_refinement_parallel.sh` launches all 3 configs as background `./run_dolfinx.sh` processes and merges their JSON via `benchmarks/merge_tradeoff_results.py` into the same report/CSV format the sequential run produces. See `parallelism/README.txt` for measured speedups and caveats (both mechanisms compete for the same CPU cores — they don't compose multiplicatively on a small core count).
+
 To build the Docker image with the stable tag (includes gmsh, matplotlib, pandas, pyvista, pytest):
 
 ```bash
@@ -56,6 +68,17 @@ python3 benchmarks/fft_only_sweep.py
 # 4-quadrant mesh-density demo: one mesh, 4 zones at 20/10/5/1 nm
 ./benchmarks/run_quadrant_demo.sh
 
+# Mesh-refinement tradeoff: uniform-coarse vs uniform-fine vs 4-quadrant,
+# solving a real point-charge problem (not just mesh stats)
+./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py --help
+
+# Same, but as 3 concurrent processes instead of 1 sequential process
+# (see parallelism/README.txt for measured speedup + caveats)
+./benchmarks/run_mesh_refinement_parallel.sh
+
+# Run any dolfinx script under N MPI ranks instead of 1
+DOLFINX_NP=4 ./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py --only uniform_fine
+
 # Clean outputs
 make clean               # remove results/*.xdmf and *.h5
 make really-clean        # also remove __pycache__, .pytest_cache, .ruff_cache, build
@@ -86,11 +109,18 @@ benchmarks/       Multi-method benchmarks
   fft_only_sweep.py            FFT leg only, pure NumPy, no Docker/dolfinx needed
   quadrant_mesh_density_demo.py  One mesh, 4 zones at distinct h (20/10/5/1 nm)
   run_quadrant_demo.sh         Docker wrapper for the quadrant demo
+  mesh_refinement_tradeoff.py  Uniform-coarse vs uniform-fine vs 4-quadrant,
+                                solving a real point-charge problem; supports
+                                --only <config> for concurrent execution
+  run_mesh_refinement_parallel.sh  Runs the 3 configs above as concurrent
+                                     processes, then merges results
+  merge_tradeoff_results.py    Merges --only run JSON outputs into one report
 src/verify/       Standalone verification benchmarks
 PC/               Point-charge problem scripts
 scripts/          Utility/sweep shell scripts
 legacy/           Inactive legacy code
 results/          Generated outputs (gitignored)
+parallelism/      MPI (DOLFINX_NP) + concurrent-configs speedup writeup/results
 ```
 
 ## Architecture
