@@ -1,0 +1,77 @@
+==============================================================================
+POINT-CHARGE BENCHMARK -- CONSOLIDATED RAW RESULTS
+==============================================================================
+
+Charge q = 1.602177e-19 C   Gaussian sigma = 5.0 nm
+
+------------------------------------------------------------------------------
+CASE A: point charge in a two-region dielectric (FEM-Dirichlet),
+        mesh-density sweep x box-size sweep
+        eps_r1 (z>=0) = 1.0, eps_r2 (z<0) = 3.9, charge at z = +30.0 nm
+        Reference: analytic two-dielectric image-charge solution
+        Probe points: x = [40.0, 60.0, 80.0] nm along x-axis at z = 30.0 nm
+------------------------------------------------------------------------------
+sweep              L[nm]   h[nm]     N      dofs  t_mesh[s]  t_solve[s]  max_relerr  mean_relerr
+------------------------------------------------------------------------------------------------
+A1_mesh_density    400.0    40.0    10     1,331      0.008       0.676   4.876e-01    4.372e-01
+A1_mesh_density    400.0    20.0    20     9,261      0.055       0.115   4.580e-01    4.385e-01
+A1_mesh_density    400.0    10.0    40    68,921      0.534       0.975   3.792e-01    3.007e-01
+A1_mesh_density    400.0     5.0    80   531,441      5.806       9.946   3.365e-01    2.520e-01
+A2_box_size        200.0    10.0    20     9,261      0.049       0.105   7.375e-01    5.453e-01
+A2_box_size        400.0    10.0    40    68,921      0.489       0.925   3.792e-01    3.007e-01
+A2_box_size        800.0    10.0    80   531,441      5.878       9.399   2.346e-01    2.010e-01
+
+  Raw phi at each probe point (FEM vs analytic), per run:
+  [A1_mesh_density L=400.0nm h=40.0nm]
+      r=  40.0nm   phi_FEM= 1.239032e-02 V   phi_exact= 2.418089e-02 V   rel_err=4.876e-01
+      r=  60.0nm   phi_FEM= 8.946084e-03 V   phi_exact= 1.395585e-02 V   rel_err=3.590e-01
+      r=  80.0nm   phi_FEM= 5.069915e-03 V   phi_exact= 9.477318e-03 V   rel_err=4.650e-01
+  [A1_mesh_density L=400.0nm h=20.0nm]
+      r=  40.0nm   phi_FEM= 1.451282e-02 V   phi_exact= 2.418089e-02 V   rel_err=3.998e-01
+      r=  60.0nm   phi_FEM= 7.564104e-03 V   phi_exact= 1.395585e-02 V   rel_err=4.580e-01
+      r=  80.0nm   phi_FEM= 5.140680e-03 V   phi_exact= 9.477318e-03 V   rel_err=4.576e-01
+  [A1_mesh_density L=400.0nm h=10.0nm]
+      r=  40.0nm   phi_FEM= 1.888502e-02 V   phi_exact= 2.418089e-02 V   rel_err=2.190e-01
+      r=  60.0nm   phi_FEM= 9.712465e-03 V   phi_exact= 1.395585e-02 V   rel_err=3.041e-01
+      r=  80.0nm   phi_FEM= 5.883913e-03 V   phi_exact= 9.477318e-03 V   rel_err=3.792e-01
+  [A1_mesh_density L=400.0nm h=5.0nm]
+      r=  40.0nm   phi_FEM= 2.013045e-02 V   phi_exact= 2.418089e-02 V   rel_err=1.675e-01
+      r=  60.0nm   phi_FEM= 1.043802e-02 V   phi_exact= 1.395585e-02 V   rel_err=2.521e-01
+      r=  80.0nm   phi_FEM= 6.287988e-03 V   phi_exact= 9.477318e-03 V   rel_err=3.365e-01
+  [A2_box_size L=200.0nm h=10.0nm]
+      r=  40.0nm   phi_FEM= 1.552745e-02 V   phi_exact= 2.418089e-02 V   rel_err=3.579e-01
+      r=  60.0nm   phi_FEM= 6.411072e-03 V   phi_exact= 1.395585e-02 V   rel_err=5.406e-01
+      r=  80.0nm   phi_FEM= 2.487369e-03 V   phi_exact= 9.477318e-03 V   rel_err=7.375e-01
+  [A2_box_size L=400.0nm h=10.0nm]
+      r=  40.0nm   phi_FEM= 1.888502e-02 V   phi_exact= 2.418089e-02 V   rel_err=2.190e-01
+      r=  60.0nm   phi_FEM= 9.712465e-03 V   phi_exact= 1.395585e-02 V   rel_err=3.041e-01
+      r=  80.0nm   phi_FEM= 5.883913e-03 V   phi_exact= 9.477318e-03 V   rel_err=3.792e-01
+  [A2_box_size L=800.0nm h=10.0nm]
+      r=  40.0nm   phi_FEM= 2.025449e-02 V   phi_exact= 2.418089e-02 V   rel_err=1.624e-01
+      r=  60.0nm   phi_FEM= 1.108079e-02 V   phi_exact= 1.395585e-02 V   rel_err=2.060e-01
+      r=  80.0nm   phi_FEM= 7.253860e-03 V   phi_exact= 9.477318e-03 V   rel_err=2.346e-01
+
+------------------------------------------------------------------------------
+CASE B: point charge, uniform dielectric -- Dirichlet vs Periodic BC
+        eps_r = 1.0, L = 400.0 nm, h = 10.0 nm
+        Reference: analytic isolated Coulomb potential
+        NOTE: true FEM-Periodic (dolfinx_mpc) unavailable in this image
+        (no PyPI wheel; not preinstalled) -- FFT used as the periodic-BC leg
+        since it solves the exact periodic Poisson equation spectrally.
+------------------------------------------------------------------------------
+method                N       dofs  t_mesh/grid[s]  t_solve[s]  max_relerr  mean_relerr
+---------------------------------------------------------------------------------------
+FEM-Dirichlet        40     68,921           0.489       1.298   6.362e-01    3.680e-01
+FFT-Periodic         40     64,000           0.003       0.006   9.671e-01    5.995e-01
+
+  Raw phi at each probe point (diagonal r = x=y=z), per method:
+  [FEM-Dirichlet]
+      r=  40.0nm   phi= 3.125177e-02 V   phi_exact= 3.599911e-02 V   rel_err=1.319e-01
+      r=  80.0nm   phi= 1.195458e-02 V   phi_exact= 1.799956e-02 V   rel_err=3.358e-01
+      r= 150.0nm   phi= 3.492204e-03 V   phi_exact= 9.599764e-03 V   rel_err=6.362e-01
+  [FFT-Periodic]
+      r=  40.0nm   phi= 2.591099e-02 V   phi_exact= 3.599911e-02 V   rel_err=2.802e-01
+      r=  80.0nm   phi= 8.079615e-03 V   phi_exact= 1.799956e-02 V   rel_err=5.511e-01
+      r= 150.0nm   phi= 3.156963e-04 V   phi_exact= 9.599764e-03 V   rel_err=9.671e-01
+
+==============================================================================
