@@ -30,4 +30,4 @@ echo "  4-quadrant mesh-density demo"
 echo "  $(date)"
 echo "========================================"
 
-"$RUN" python3 benchmarks/quadrant_mesh_density_demo.py "$@"
+"$RUN" benchmarks/quadrant_mesh_density_demo.py "$@"

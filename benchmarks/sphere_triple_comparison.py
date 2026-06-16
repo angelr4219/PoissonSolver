@@ -60,7 +60,7 @@ for a single mesh split into 4 differently-refined zones (20/10/5/1 nm).
 
 Usage
 -----
-    ./run_dolfinx.sh python3 benchmarks/sphere_triple_comparison.py [--help]
+    ./run_dolfinx.sh benchmarks/sphere_triple_comparison.py [--help]
 
     --L_nm        box side [nm]          default 500
     --R_nm        sphere radius [nm]     default 50
@@ -142,7 +142,7 @@ def _fem_probe_error(domain, V, uh, probe_pts_m, V0, R_m):
     for i, pt in enumerate(probe_pts_m):
         cell_list = cells.links(i)
         if len(cell_list) > 0:
-            val = uh.eval(pt.reshape(1, -1), cell_list[:1])[0, 0]
+            val = float(np.asarray(uh.eval(pt.reshape(1, -1), cell_list[:1])).reshape(-1)[0])
         else:
             val = float("nan")
         phi_h.append(val)

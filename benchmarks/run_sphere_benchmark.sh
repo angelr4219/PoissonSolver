@@ -32,4 +32,4 @@ echo "  Sphere triple-comparison benchmark"
 echo "  $(date)"
 echo "========================================"
 
-"$RUN" python3 benchmarks/sphere_triple_comparison.py "$@"
+"$RUN" benchmarks/sphere_triple_comparison.py "$@"

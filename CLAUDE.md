@@ -7,10 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All code requires **dolfinx** (modern FEniCS), which is not pip-installable in the standard way. The canonical way to run anything is through the Docker wrapper:
 
 ```bash
-./run_dolfinx.sh python3 <script.py> [args]
+./run_dolfinx.sh <script.py> [args]
 ```
 
-This mounts `$PWD` as `/app` inside `dolfinx/dolfinx:nightly`, sets `PYTHONPATH=/app/src`, and runs the given command. The `Makefile` uses this wrapper automatically if `run_dolfinx.sh` is present.
+This mounts `$PWD` as `/app` inside `dolfinx/dolfinx:nightly`, sets `PYTHONPATH=/app/src`, and runs `/dolfinx-env/bin/python3 -u <script.py> [args]` inside the container. The `Makefile` uses this wrapper automatically if `run_dolfinx.sh` is present.
+
+**Do not prefix the script with a literal `python3`** (i.e. do not call `./run_dolfinx.sh python3 script.py`) — `run_dolfinx.sh`'s internal `sh -lc '...' -- "$@"` causes the shell's positional-parameter handling to swallow that token, and the container's python3 ends up trying to open a file literally named `python3`, failing with `can't open file '/app/python3'`. Always call it as `./run_dolfinx.sh script.py [args]`, matching how the `Makefile` already invokes it.
 
 To build the Docker image with the stable tag (includes gmsh, matplotlib, pandas, pyvista, pytest):
 
@@ -41,7 +43,7 @@ make test-3d             # ./run_dolfinx.sh tests/test_mms_3d.py
 # OOM/timeout); FFT runs all five, capped by --fft-max-n on grid points/dim.
 ./benchmarks/run_sphere_benchmark.sh
 ./benchmarks/run_sphere_benchmark.sh --skip-per          # skip if dolfinx_mpc absent
-./run_dolfinx.sh python3 benchmarks/sphere_triple_comparison.py --help
+./run_dolfinx.sh benchmarks/sphere_triple_comparison.py --help
 
 # FFT-only leg of the above, pure NumPy -- no Docker/dolfinx required
 python3 benchmarks/fft_only_sweep.py

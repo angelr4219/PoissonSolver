@@ -4,13 +4,23 @@ Two geometry variants:
   sphere_refined_box  – plain box with a Ball field for local refinement near origin
   sphere_in_box       – box with a spherical void cut out (conducting sphere geometry)
 
-All length inputs are in nanometres; internally everything is converted to metres
-before being passed to gmsh/dolfinx.
+All length inputs are in nanometres.  The OCC geometry kernel is built directly
+in nanometre-magnitude coordinates (NOT pre-converted to metres): OCC's boolean
+operations (cut/fuse) use an absolute tolerance tuned for ~unit-scale geometry,
+and constructing boxes/spheres with 1e-9-scale coordinates causes spurious
+"BOPAlgo_AlertBuilderFailed" boolean-cut failures.  The mesh is rescaled to
+metres (`domain.geometry.x *= 1e-9`) immediately after gmsh hands it to dolfinx,
+so callers still receive an SI-unit mesh as before.
 """
 from __future__ import annotations
 import numpy as np
 import gmsh
-from dolfinx.io import gmshio
+try:
+    from dolfinx.io import gmshio
+except ImportError:
+    from dolfinx.io import gmsh as gmshio
+
+_NM_TO_M = 1e-9
 
 
 def sphere_refined_box(
@@ -36,10 +46,9 @@ def sphere_refined_box(
     Returns
     -------
     domain, cell_tags, facet_tags
-        Outer box faces are all tagged 1.
+        Outer box faces are all tagged 1.  Mesh geometry is in metres.
     """
-    s = 1e-9
-    L, R, hf, hc = L_nm*s, R_ref_nm*s, h_fine_nm*s, h_coarse_nm*s
+    L, R, hf, hc = L_nm, R_ref_nm, h_fine_nm, h_coarse_nm
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
@@ -69,6 +78,7 @@ def sphere_refined_box(
 
     domain, cell_tags, facet_tags, *_ = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
     gmsh.finalize()
+    domain.geometry.x[:] *= _NM_TO_M
     return domain, cell_tags, facet_tags
 
 
@@ -97,10 +107,9 @@ def sphere_in_box(
     Returns
     -------
     domain, cell_tags, facet_tags
-        Box faces tagged 1; sphere surface tagged 2.
+        Box faces tagged 1; sphere surface tagged 2.  Mesh geometry is in metres.
     """
-    s = 1e-9
-    L, R, hf, hc = L_nm*s, R_nm*s, h_fine_nm*s, h_coarse_nm*s
+    L, R, hf, hc = L_nm, R_nm, h_fine_nm, h_coarse_nm
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
@@ -116,7 +125,7 @@ def sphere_in_box(
     vol_tag = out_vols[0][1]
     gmsh.model.addPhysicalGroup(3, [vol_tag], tag=1)
 
-    # Classify surfaces by centroid distance from origin
+    # Classify surfaces by centroid distance from origin (nm-scale here).
     box_surfs, sph_surfs = [], []
     for _, stag in gmsh.model.getEntities(dim=2):
         cx, cy, cz = gmsh.model.occ.getCenterOfMass(2, stag)
@@ -148,4 +157,5 @@ def sphere_in_box(
 
     domain, cell_tags, facet_tags, *_ = gmshio.model_to_mesh(gmsh.model, comm, 0, gdim=3)
     gmsh.finalize()
+    domain.geometry.x[:] *= _NM_TO_M
     return domain, cell_tags, facet_tags

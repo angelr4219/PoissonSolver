@@ -19,7 +19,7 @@ Output (results/quadrant_density/):
     quadrant_summary.csv       per-quadrant target h, n_cells, measured h
 
 Usage:
-    ./run_dolfinx.sh python3 benchmarks/quadrant_mesh_density_demo.py [--L-nm 200]
+    ./run_dolfinx.sh benchmarks/quadrant_mesh_density_demo.py [--L-nm 200]
 """
 from __future__ import annotations
 import argparse

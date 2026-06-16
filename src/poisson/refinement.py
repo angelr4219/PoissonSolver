@@ -53,33 +53,43 @@ def build_refined_mesh_3d(
     -------
     dolfinx.mesh.Mesh
     """
+    # OCC's boolean/construction tolerances assume ~unit-scale geometry; at
+    # metre-scale (1e-9 magnitude) coordinates gmsh.model.occ.addBox raises
+    # "OpenCASCADE exception".  Build the geometry in nanometre-magnitude
+    # numbers instead, then rescale the resulting mesh back to metres
+    # (consistent with the fix applied to geom_sphere.py).
+    _M_TO_NM = 1e9
+    _NM_TO_M = 1e-9
+
     gmsh.initialize()
     gmsh.model.add("refined_domain")
 
-    vol = gmsh.model.occ.addBox(-Lx / 2, -Ly / 2, 0.0, Lx, Ly, Lz)
+    vol = gmsh.model.occ.addBox(-Lx * _M_TO_NM / 2, -Ly * _M_TO_NM / 2, 0.0,
+                                 Lx * _M_TO_NM, Ly * _M_TO_NM, Lz * _M_TO_NM)
     gmsh.model.occ.synchronize()
 
     gmsh.model.addPhysicalGroup(3, [vol], 1)
     gmsh.model.setPhysicalName(3, 1, "domain")
 
-    h_fine_global = min(b.h_fine for b in boxes) if boxes else h_coarse
+    h_coarse_nm = h_coarse * _M_TO_NM
+    h_fine_global_nm = (min(b.h_fine for b in boxes) if boxes else h_coarse) * _M_TO_NM
 
     field_ids = []
     for box in boxes:
         fid = gmsh.model.mesh.field.add("Box")
-        gmsh.model.mesh.field.setNumber(fid, "VIn",  box.h_fine)
-        gmsh.model.mesh.field.setNumber(fid, "VOut", h_coarse)
-        gmsh.model.mesh.field.setNumber(fid, "XMin", box.cx - box.lx / 2)
-        gmsh.model.mesh.field.setNumber(fid, "XMax", box.cx + box.lx / 2)
-        gmsh.model.mesh.field.setNumber(fid, "YMin", box.cy - box.ly / 2)
-        gmsh.model.mesh.field.setNumber(fid, "YMax", box.cy + box.ly / 2)
-        gmsh.model.mesh.field.setNumber(fid, "ZMin", box.cz - box.lz / 2)
-        gmsh.model.mesh.field.setNumber(fid, "ZMax", box.cz + box.lz / 2)
+        gmsh.model.mesh.field.setNumber(fid, "VIn",  box.h_fine * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "VOut", h_coarse_nm)
+        gmsh.model.mesh.field.setNumber(fid, "XMin", (box.cx - box.lx / 2) * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "XMax", (box.cx + box.lx / 2) * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "YMin", (box.cy - box.ly / 2) * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "YMax", (box.cy + box.ly / 2) * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "ZMin", (box.cz - box.lz / 2) * _M_TO_NM)
+        gmsh.model.mesh.field.setNumber(fid, "ZMax", (box.cz + box.lz / 2) * _M_TO_NM)
         field_ids.append(fid)
 
     if len(field_ids) == 0:
         bg = gmsh.model.mesh.field.add("MathEval")
-        gmsh.model.mesh.field.setString(bg, "F", str(h_coarse))
+        gmsh.model.mesh.field.setString(bg, "F", str(h_coarse_nm))
     elif len(field_ids) == 1:
         bg = field_ids[0]
     else:
@@ -91,14 +101,15 @@ def build_refined_mesh_3d(
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h_fine_global)
-    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h_coarse)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h_fine_global_nm)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h_coarse_nm)
 
     gmsh.model.mesh.generate(3)
 
     mesh_data = gmshio.model_to_mesh(gmsh.model, comm, rank=rank, gdim=3)
     gmsh.finalize()
 
+    mesh_data.mesh.geometry.x[:] *= _NM_TO_M
     return mesh_data.mesh
 
 
