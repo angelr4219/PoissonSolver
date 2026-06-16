@@ -10,21 +10,23 @@ The analytic solution in an INFINITE homogeneous medium is:
 
     φ(r) = V₀ · R / r        r > R
 
-Three methods are compared at six mesh refinement levels:
-    h [nm] : 50, 25, 10, 5, 1, 0.1
+Three methods are compared at five mesh refinement levels:
+    h [nm] : 20, 10, 5, 1, 0.1
 
 Method 1 – FEM-Dirichlet
     FEM on sphere_in_box gmsh mesh (adaptive refinement near sphere).
     Outer box: φ = 0 (Dirichlet).  Models an isolated sphere.
     h_fine = element size near sphere; h_coarse = max(5·h_fine, 25) nm.
-    NOTE: h_fine = 0.1 nm skipped by default (impractical element count).
+    NOTE: h_fine < 5 nm (i.e. 1, 0.1) skipped by default (impractical
+          element count / observed to OOM or time out the container).
 
 Method 2 – FEM-Periodic
     FEM on sphere_in_box gmsh mesh with 3-D periodic BCs on the box faces
     via dolfinx_mpc.  Models an infinite periodic array of spheres.
     Requires: dolfinx_mpc  (pip install dolfinx_mpc or build from source).
-    NOTE: h_fine = 0.1 nm skipped; periodic constraint accuracy depends on
-          how well dolfinx_mpc resolves non-matching boundary nodes.
+    NOTE: h_fine < 5 nm skipped, same rationale as FEM-Dirichlet; periodic
+          constraint accuracy also depends on how well dolfinx_mpc resolves
+          non-matching boundary nodes.
 
 Method 3 – FFT
     Spectral solve on a uniform N³ Cartesian grid with periodic BCs.
@@ -49,6 +51,12 @@ results/sphere_triple/
     per_h{h_nm}nm.xdmf+.h5    – FEM-Periodic  solution field
     fft_h{h_nm}nm.npz          – FFT solution array (phi, rho, grid coords)
     SUGGESTIONS.txt            – recommendations for MEMS/real-device comparison
+                                  (see item 0 for why mesh refinement alone
+                                  will not close the gap with MASQUE)
+
+See also benchmarks/fft_only_sweep.py for a pure-NumPy FFT-only sweep that
+runs without Docker/dolfinx, and benchmarks/quadrant_mesh_density_demo.py
+for a single mesh split into 4 differently-refined zones (20/10/5/1 nm).
 
 Usage
 -----
@@ -95,7 +103,6 @@ from poisson.analytics import phi_conducting_sphere
 # ── dolfinx_mpc (optional) ────────────────────────────────────────────────────
 try:
     from dolfinx_mpc import MultiPointConstraint
-    from dolfinx_mpc import LinearProblem as MPCLinearProblem
     HAS_MPC = True
 except ImportError:
     HAS_MPC = False
@@ -181,13 +188,32 @@ def run_fem_dirichlet(L_nm, R_nm, h_fine_nm, h_coarse_nm, V0, outdir):
     a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = fem.Constant(domain, PETSc.ScalarType(0.0)) * v * ufl.dx
 
-    from dolfinx.fem.petsc import LinearProblem
+    # Manual PETSc assembly (avoids LinearProblem ctor-signature drift across
+    # dolfinx releases, which has been observed to silently break and return
+    # NaN/zero results instead of raising).
+    from dolfinx.fem import petsc as fem_petsc
+
     t1 = time.perf_counter()
-    problem = LinearProblem(a, L, bcs=bcs,
-                            petsc_options={"ksp_type": "cg", "pc_type": "hypre",
-                                           "ksp_rtol": 1e-10},
-                            petsc_options_prefix="dir_")
-    uh = problem.solve()
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+
+    A = fem_petsc.assemble_matrix(a_form, bcs=bcs)
+    A.assemble()
+    b = fem_petsc.assemble_vector(L_form)
+    fem_petsc.apply_lifting(b, [a_form], bcs=[bcs])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    fem_petsc.set_bc(b, bcs)
+
+    ksp = PETSc.KSP().create(domain.comm)
+    ksp.setOperators(A)
+    ksp.setType("cg")
+    ksp.getPC().setType("hypre")
+    ksp.setTolerances(rtol=1e-10)
+    ksp.setFromOptions()
+
+    uh = fem.Function(V)
+    ksp.solve(b, uh.x.petsc_vec)
+    uh.x.scatter_forward()
     uh.name = "phi"
     t_solve = time.perf_counter() - t1
 
@@ -263,11 +289,35 @@ def run_fem_periodic(L_nm, R_nm, h_fine_nm, h_coarse_nm, V0, outdir):
     a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = fem.Constant(domain, PETSc.ScalarType(0.0)) * v * ufl.dx
 
+    # Manual assembly via the dolfinx_mpc low-level API: MPCLinearProblem's
+    # constructor signature has changed across releases (it wraps the same
+    # dolfinx.fem.petsc.LinearProblem that breaks on nightly), so build the
+    # periodic-constrained system by hand instead.
+    import dolfinx_mpc
+    from dolfinx.fem import petsc as fem_petsc
+
     t1 = time.perf_counter()
-    problem = MPCLinearProblem(a, L, mpc, bcs=[bc_sph],
-                               petsc_options={"ksp_type": "cg", "pc_type": "hypre",
-                                              "ksp_rtol": 1e-10})
-    uh = problem.solve()
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+
+    A = dolfinx_mpc.assemble_matrix(a_form, mpc, bcs=[bc_sph])
+    A.assemble()
+    b = dolfinx_mpc.assemble_vector(L_form, mpc)
+    dolfinx_mpc.apply_lifting(b, [a_form], bcs=[[bc_sph]], constraint=mpc)
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    fem_petsc.set_bc(b, [bc_sph])
+
+    ksp = PETSc.KSP().create(domain.comm)
+    ksp.setOperators(A)
+    ksp.setType("cg")
+    ksp.getPC().setType("hypre")
+    ksp.setTolerances(rtol=1e-10)
+    ksp.setFromOptions()
+
+    uh = fem.Function(V)
+    ksp.solve(b, uh.x.petsc_vec)
+    mpc.backsubstitution(uh.x.petsc_vec)
+    uh.x.scatter_forward()
     uh.name = "phi"
     t_solve = time.perf_counter() - t1
 
@@ -351,6 +401,29 @@ def run_fft(L_nm, R_nm, h_nm, V0, outdir, fft_max_n):
 _SUGGESTIONS = """\
 SUGGESTIONS FOR COMPARISON AGAINST REAL MEMS SIMULATIONS
 =========================================================
+
+0. ROOT CAUSE OF POOR AGREEMENT WITH MASQUE: PERIODIC-IMAGE ERROR DOES NOT
+   SHRINK WITH MESH REFINEMENT -- CONFIRMED EMPIRICALLY.
+   Running the FFT leg (benchmarks/fft_only_sweep.py, pure NumPy, no Docker
+   needed) at the default L=500 nm / R=50 nm / probes at r=100,150,200 nm
+   shows max_rel_err frozen at ~1.0 (100%!) across h = 20, 10, 5 nm -- i.e.
+   refining the mesh from 20 nm down to 5 nm changes the error by < 1%.
+   Repeating at L=2000 nm (R/L = 0.025 instead of 0.1) drops the error to
+   ~0.28 and it again plateaus across h = 20, 10, 5 nm.  This proves the
+   error is controlled by R/L (sphere radius vs. domain/periodic-cell size),
+   NOT by element/grid density.  The FFT and FEM-Periodic methods solve an
+   INFINITE PERIODIC ARRAY of spheres; their potential differs from the
+   isolated-sphere analytic reference by an image-field term that only
+   vanishes as L/R -> infinity.  If MASQUE uses isolated (open) boundary
+   conditions, no amount of mesh refinement here will make FFT/FEM-Periodic
+   match it at L/R = 10 -- you need either:
+     (a) L/R >> 10 (e.g. >= 40, error ~1-2%) for genuinely isolated physics, or
+     (b) probe points well inside the cell (r << L/2) so the comparison
+         point itself is far from periodic images, or
+     (c) apply an explicit periodic-image correction (see item 2) and
+         compare against the corrected, not the isolated, reference.
+   FEM-Dirichlet (item 1) has the analogous but smaller truncation error
+   since it has no periodic images, only one truncation boundary.
 
 1. DOMAIN TRUNCATION ERROR (FEM-Dirichlet)
    The Dirichlet φ=0 boundary at L=500 nm introduces error proportional to
@@ -461,9 +534,12 @@ def main():
         print(f"  Output:  {outdir}")
         print("=" * 60)
 
-    # Mesh refinement levels [nm]: skip 0.1 for FEM (impractical element count)
-    H_ALL_NM      = [50.0, 25.0, 10.0, 5.0, 1.0, 0.1]
-    H_FEM_NM      = [h for h in H_ALL_NM if h >= 1.0]
+    # Mesh refinement levels [nm].  FEM (Dirichlet/Periodic) is capped at
+    # h >= 5 nm: h=1nm and h=0.1nm produce tetrahedra counts that have been
+    # observed to OOM/timeout the Docker container; FFT has no such limit
+    # since its cost is set by the uniform grid N = L/h (capped by --fft-max-n).
+    H_ALL_NM      = [20.0, 10.0, 5.0, 1.0, 0.1]
+    H_FEM_NM      = [h for h in H_ALL_NM if h >= 5.0]
     H_FFT_NM      = H_ALL_NM
 
     results = []

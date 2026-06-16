@@ -37,9 +37,22 @@ make test-2d             # ./run_dolfinx.sh tests/test_mms_2d.py
 make test-3d             # ./run_dolfinx.sh tests/test_mms_3d.py
 
 # Triple-method sphere benchmark (FEM-Dirichlet / FEM-Periodic / FFT)
+# Mesh sweep: h = 20, 10, 5, 1, 0.1 nm. FEM legs cap at h >= 5 nm (1/0.1 nm
+# OOM/timeout); FFT runs all five, capped by --fft-max-n on grid points/dim.
 ./benchmarks/run_sphere_benchmark.sh
 ./benchmarks/run_sphere_benchmark.sh --skip-per          # skip if dolfinx_mpc absent
 ./run_dolfinx.sh python3 benchmarks/sphere_triple_comparison.py --help
+
+# FFT-only leg of the above, pure NumPy -- no Docker/dolfinx required
+python3 benchmarks/fft_only_sweep.py
+# IMPORTANT: at the default L=500nm/R=50nm, FFT/FEM-Periodic error vs. the
+# isolated-sphere analytic solution is dominated by periodic-image
+# contamination (R/L ratio), not mesh density -- see SUGGESTIONS.txt item 0
+# (written by sphere_triple_comparison.py) before chasing "accuracy" by
+# refining h further.
+
+# 4-quadrant mesh-density demo: one mesh, 4 zones at 20/10/5/1 nm
+./benchmarks/run_quadrant_demo.sh
 
 # Clean outputs
 make clean               # remove results/*.xdmf and *.h5
@@ -68,6 +81,9 @@ main/             Driver and MMS test suite
 benchmarks/       Multi-method benchmarks
   sphere_triple_comparison.py  FEM-Dir vs FEM-Per vs FFT on sphere geometry
   run_sphere_benchmark.sh      Docker wrapper for the above
+  fft_only_sweep.py            FFT leg only, pure NumPy, no Docker/dolfinx needed
+  quadrant_mesh_density_demo.py  One mesh, 4 zones at distinct h (20/10/5/1 nm)
+  run_quadrant_demo.sh         Docker wrapper for the quadrant demo
 src/verify/       Standalone verification benchmarks
 PC/               Point-charge problem scripts
 scripts/          Utility/sweep shell scripts
