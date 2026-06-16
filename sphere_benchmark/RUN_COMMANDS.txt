@@ -1,0 +1,35 @@
+Exact commands used to produce every file in this folder
+===========================================================
+
+1. FEM-Dirichlet + FFT (small grids only, capped at N<=300/dim), via Docker:
+
+   ./run_dolfinx.sh benchmarks/sphere_triple_comparison.py --skip-per
+
+   -> produced: comparison_results.csv, dir_h{20,10,5}nm.xdmf/.h5,
+                fft_h{20,10,5}nm.npz, SUGGESTIONS.txt (renamed ANALYSIS.txt here)
+
+   --skip-per was passed because dolfinx_mpc (needed for a true FEM-Periodic
+   leg) is not installed and not pip-installable in the dolfinx/dolfinx:nightly
+   image used by run_dolfinx.sh (no PyPI wheel, no conda/mamba in the image
+   to build it from conda-forge). The script auto-detects this anyway
+   ("MPC available: False") and skips that leg even without the flag.
+
+   Defaults used (not overridden): --L-nm 500 --R-nm 50 --V0 1.0
+   --fft-max-n 300 (FEM legs auto-restricted to h>=5nm; smaller h would
+   produce meshes too large to solve in reasonable time/memory here).
+
+2. FFT leg only, full h sweep including h=1nm, pure NumPy (NO Docker needed):
+
+   python3 benchmarks/fft_only_sweep.py --fft-max-n 600
+
+   -> produced: fft_only_results.csv
+
+   --fft-max-n raised from the script's default (300) to 600 specifically
+   to let the h=1nm case (N=500 grid points/dim) run; h=0.1nm (N=5000) was
+   still skipped -- a 5000^3 float64 array is ~1 TB, infeasible in this
+   sandbox's 15.7 GB RAM.  This run is what supplies the h=1nm FFT row that
+   benchmarks/sphere_triple_comparison.py itself does not reach (its FFT
+   cap defaults to 300 and the FEM legs cap at h>=5nm).
+
+All other arguments (q, sigma, geometry) are the scripts' own defaults --
+see ANALYSIS.txt and the .py files themselves for what those are.

@@ -1,0 +1,83 @@
+SUGGESTIONS FOR COMPARISON AGAINST REAL MEMS SIMULATIONS
+=========================================================
+
+0. ROOT CAUSE OF POOR AGREEMENT WITH MASQUE: PERIODIC-IMAGE ERROR DOES NOT
+   SHRINK WITH MESH REFINEMENT -- CONFIRMED EMPIRICALLY.
+   Running the FFT leg (benchmarks/fft_only_sweep.py, pure NumPy, no Docker
+   needed) at the default L=500 nm / R=50 nm / probes at r=100,150,200 nm
+   shows max_rel_err frozen at ~1.0 (100%!) across h = 20, 10, 5 nm -- i.e.
+   refining the mesh from 20 nm down to 5 nm changes the error by < 1%.
+   Repeating at L=2000 nm (R/L = 0.025 instead of 0.1) drops the error to
+   ~0.28 and it again plateaus across h = 20, 10, 5 nm.  This proves the
+   error is controlled by R/L (sphere radius vs. domain/periodic-cell size),
+   NOT by element/grid density.  The FFT and FEM-Periodic methods solve an
+   INFINITE PERIODIC ARRAY of spheres; their potential differs from the
+   isolated-sphere analytic reference by an image-field term that only
+   vanishes as L/R -> infinity.  If MASQUE uses isolated (open) boundary
+   conditions, no amount of mesh refinement here will make FFT/FEM-Periodic
+   match it at L/R = 10 -- you need either:
+     (a) L/R >> 10 (e.g. >= 40, error ~1-2%) for genuinely isolated physics, or
+     (b) probe points well inside the cell (r << L/2) so the comparison
+         point itself is far from periodic images, or
+     (c) apply an explicit periodic-image correction (see item 2) and
+         compare against the corrected, not the isolated, reference.
+   FEM-Dirichlet (item 1) has the analogous but smaller truncation error
+   since it has no periodic images, only one truncation boundary.
+
+1. DOMAIN TRUNCATION ERROR (FEM-Dirichlet)
+   The Dirichlet φ=0 boundary at L=500 nm introduces error proportional to
+   R/L = 0.1.  For MEMS comparison, either:
+   (a) Increase L until error saturates, or
+   (b) Apply exact far-field BC: φ = V₀R/r on the box surface (first-order ABC).
+   (c) Use a Robin (mixed) BC: ∂φ/∂n + φ/r = 0 for spherically symmetric decay.
+
+2. PERIODIC IMAGES (FEM-Periodic, FFT)
+   Periodic methods model an infinite array of spheres separated by L.  For
+   MEMS arrays with pitch p, set L = p to directly match the periodic geometry.
+   The Madelung-like correction for the periodic self-energy is:
+       φ_corr ≈ -2.837297 · q / (4πε₀ L)  (Wigner-Seitz correction)
+
+3. VARIABLE PERMITTIVITY
+   Real MEMS have dielectric layers (SiO₂ ε≈3.9, Si₃N₄ ε≈7).  The FEM solver
+   already supports DG0 permittivity via dg0_from_indicator or piecewise_eps_DG0_2regions.
+   FFT cannot handle variable ε natively; switch to a real-space multigrid or
+   preconditioned iterative method for multi-dielectric problems.
+
+4. HIGHER-ORDER ELEMENTS
+   Currently all FEM uses P1 (linear) elements.  P2 elements give O(h⁴) L2
+   convergence instead of O(h²) for smooth solutions, halving the mesh
+   density needed for a given accuracy.  Change ("Lagrange", 1) → ("Lagrange", 2)
+   and compare h-refinement slopes.
+
+5. CAPACITANCE EXTRACTION
+   For MEMS device comparison, extract the sphere capacitance:
+       C = Q / V₀   where  Q = ε₀ ∮ ∂φ/∂n dS  (surface integral on sphere)
+   In FEM: assemble the surface flux via ufl.inner(eps*ufl.grad(uh), n)*ufl.ds(2).
+   Compare to analytic C₀ = 4πε₀R and to C obtained from COMSOL/ANSYS.
+
+6. MULTI-CONDUCTOR PROBLEMS
+   Real gates have multiple electrodes at different potentials.  Extend
+   sphere_in_box to include N spheres via gmsh Boolean operations, and
+   verify by computing the full N×N capacitance matrix.
+
+7. SOLVER SCALING
+   For fine meshes (> 10⁶ DOFs), the CG+HYPRE solver can be replaced with
+   MUMPS direct solver (better for multiple RHS) or PETSc GAMG for faster
+   parallel scaling.  Add --solver flag to benchmark script.
+
+8. COMPARISON WORKFLOW AGAINST COMSOL / ANSYS
+   (a) Export FEM mesh to .msh or .vtk and import into COMSOL to reuse geometry.
+   (b) Compare φ on the same probe-point line (r = 100→250 nm) exported as CSV.
+   (c) Use the image-charge analytic solution in analytics.phi_image_3d as a
+       common ground truth for both tools.
+
+9. SPACE CHARGE / SEMICONDUCTOR COUPLING
+   For realistic MEMS/transistor simulations, ρ is not fixed but coupled to
+   carrier densities via the drift-diffusion equations.  A Poisson-DD solver
+   would use the Poisson equation here as the inner loop of a Gummel iteration.
+
+10. MESH QUALITY METRICS
+    For curved sphere surface, check: min/max dihedral angles, skewness, and
+    aspect ratio using meshio or dolfinx's cell quality tools.  Poor-quality
+    tetrahedra near the sphere surface inflate condition number and solver
+    iterations.

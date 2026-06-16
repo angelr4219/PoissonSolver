@@ -1,0 +1,41 @@
+==============================================================================
+MESH-REFINEMENT TRADEOFF -- uniform-coarse vs uniform-fine vs 4-quadrant
+==============================================================================
+
+Domain: cube L = 80.0 nm, x,y in [-L/2,L/2], z in [0,L]
+Charge: q = 1.602177e-19 C at quadrant-4 centre (20.0, 20.0, 40.0) nm, Gaussian sigma = 2.0 nm, eps_r = 1.0
+Probe points: r = [5.0, 10.0, 15.0] nm from the charge, along +x, inside Q4
+Reference: analytic isolated point-charge Coulomb potential (poisson.analytics.phi_point_charge)
+Quadrant layout (x<0/x>0 split at x=0, y<0/y>0 split at y=0, full z height):
+  Q1 (x<0,y<0): h=20.0 nm    Q2 (x>0,y<0): h=10.0 nm
+  Q3 (x<0,y>0): h=5.0 nm    Q4 (x>0,y>0): h=1.0 nm  <- charge here
+
+------------------------------------------------------------------------------
+config          mesh                       n_cells    n_dofs  t_mesh[s]  t_solve[s]  max_relerr  mean_relerr
+----------------------------------------------------------------------------------------------------
+uniform_coarse  20.0nm uniform                 384       125       0.00        0.65   9.676e-01    9.641e-01
+uniform_fine    1.0nm uniform            3,072,000   531,441       5.87        9.54   6.355e-01    4.003e-01
+quadrant_mixed  Q1=20/Q2=10/Q3=5/Q4=1nm    577,618    98,124      17.27        3.65   6.371e-01    4.079e-01
+
+  Raw phi at each probe point (FEM vs analytic), per config:
+  [uniform_coarse  (20.0nm uniform)]
+      r=   5.0nm   phi_FEM= 9.316628e-03 V   phi_exact= 2.879929e-01 V   rel_err=9.676e-01
+      r=  10.0nm   phi_FEM= 6.211085e-03 V   phi_exact= 1.439965e-01 V   rel_err=9.569e-01
+      r=  15.0nm   phi_FEM= 3.105543e-03 V   phi_exact= 9.599764e-02 V   rel_err=9.676e-01
+  [uniform_fine  (1.0nm uniform)]
+      r=   5.0nm   phi_FEM= 2.340472e-01 V   phi_exact= 2.879929e-01 V   rel_err=1.873e-01
+      r=  10.0nm   phi_FEM= 8.953456e-02 V   phi_exact= 1.439965e-01 V   rel_err=3.782e-01
+      r=  15.0nm   phi_FEM= 3.499292e-02 V   phi_exact= 9.599764e-02 V   rel_err=6.355e-01
+  [quadrant_mixed  (Q1=20/Q2=10/Q3=5/Q4=1nm)]
+      r=   5.0nm   phi_FEM= 2.322257e-01 V   phi_exact= 2.879929e-01 V   rel_err=1.936e-01
+      r=  10.0nm   phi_FEM= 8.738874e-02 V   phi_exact= 1.439965e-01 V   rel_err=3.931e-01
+      r=  15.0nm   phi_FEM= 3.484003e-02 V   phi_exact= 9.599764e-02 V   rel_err=6.371e-01
+
+------------------------------------------------------------------------------
+TRADEOFF SUMMARY
+------------------------------------------------------------------------------
+  uniform_fine total time   = 15.41s (531,441 dofs, max_rel_err=6.355e-01)
+  quadrant_mixed total time = 20.92s (98,124 dofs, max_rel_err=6.371e-01)
+  uniform_coarse total time = 0.65s (125 dofs, max_rel_err=9.676e-01)
+  -> quadrant_mixed uses 5.4x fewer DOFs than uniform_fine, runs 0.7x slower, for comparable near-charge accuracy.
+==============================================================================

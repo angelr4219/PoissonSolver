@@ -1,0 +1,20 @@
+Exact command used to produce every file in this folder
+===========================================================
+
+./run_dolfinx.sh benchmarks/mesh_refinement_tradeoff.py
+
+All arguments are the script's own defaults:
+  --L-nm 80              cube domain, 80nm side
+  --h-coarse-nm 20       uniform_coarse mesh size
+  --h-fine-nm 1          uniform_fine mesh size
+  --h-q1-nm 20 --h-q2-nm 10 --h-q3-nm 5 --h-q4-nm 1   quadrant mesh sizes
+  --q 1.602176634e-19    +e
+  --sigma-nm 2.0         Gaussian regularisation width
+  --eps-r 1.0            uniform dielectric
+  --probe-r-nm 5 10 15   probe radii from the charge, inside Q4
+  --outdir results/mesh_refinement
+
+The charge is placed at the centre of quadrant 4 (the finest, h=1nm,
+quadrant), at (20, 20, 40) nm, so all three meshes are tested on the same
+physical problem: same domain, same Dirichlet (phi=0) BC, same point
+charge, same probe points -- only the mesh differs.
