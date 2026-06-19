@@ -1,6 +1,8 @@
 {
-  "n_accepted_z155": 1,
-  "n_total_z155": 1,
+  "n_accepted": 11,
+  "n_total": 11,
+  "n_qw_excluded": 0,
   "all_accepted": true,
-  "accept_threshold_pct": 5.0
+  "accept_threshold_pct": 5.0,
+  "qw_exclude_nm": null
 }
