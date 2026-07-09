@@ -29,18 +29,17 @@ mpc = MultiPointConstraint(V)
 mpc.create_periodic_constraint_geometrical(V, periodic_boundary, periodic_relation, [gauge_bc])
 mpc.finalize()
 
-# Right-hand side: f = sin(2πx)
+# Right-hand side: f = sin(2πx)  [source for -u'' = f, u = sin(2πx)/(4π²)]
 x = ufl.SpatialCoordinate(domain)[0]
 u = ufl.TrialFunction(V); v = ufl.TestFunction(V)
-f_expr = fem.Constant(domain, 0.0)  # We'll assemble with expression
-f = 2*np.pi*np.cos(2*np.pi*x)  # derivative of sin(2πx)
+f = ufl.sin(2 * np.pi * x)
 
 a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
 L = f * v * ufl.dx
 problem = LinearProblem(a, L, mpc, bcs=[gauge_bc])
 uh = problem.solve()
 
-# Exact solution: u = 1/(2π)^2 sin(2πx)
+# Exact solution: u = 1/(4π²) sin(2πx)
 exact_expr = fem.Expression(lambda x: (1/(4*np.pi**2))*np.sin(2*np.pi*x[0]), V.element.interpolation_points)
 ue = fem.Function(V); ue.interpolate(exact_expr)
 # Error norm

@@ -1,0 +1,18 @@
+{
+  "created": "2026-06-26T11:42:57",
+  "root": "/Users/angelramirez/Desktop/poisson_solver/june 26",
+  "moved": false,
+  "n_staged": 2,
+  "files": [
+    {
+      "kind": "xdmf",
+      "src": "Results/direct_R10_hex_h6_neg1_neg12_Lz255/direct_R10_hex_h6_neg1_neg12_Lz255.xdmf",
+      "dst": "/Users/angelramirez/Desktop/poisson_solver/june 26/fem/direct_R10_hex_h6_neg1_neg12_Lz255/direct_R10_hex_h6_neg1_neg12_Lz255.xdmf"
+    },
+    {
+      "kind": "h5",
+      "src": "Results/direct_R10_hex_h6_neg1_neg12_Lz255/direct_R10_hex_h6_neg1_neg12_Lz255.h5",
+      "dst": "/Users/angelramirez/Desktop/poisson_solver/june 26/fem/direct_R10_hex_h6_neg1_neg12_Lz255/direct_R10_hex_h6_neg1_neg12_Lz255.h5"
+    }
+  ]
+}

@@ -30,7 +30,7 @@ def solve(nx, ny):
 
     # Dirichlet BC on all sides
     u_D = fem.Function(V)
-    u_D.interpolate(fem.Expression(u_exact, V.element.interpolation_points()))
+    u_D.interpolate(fem.Expression(u_exact, V.element.interpolation_points))
     fdim = domain.topology.dim - 1
     facets = mesh.locate_entities_boundary(
         domain,
@@ -46,9 +46,11 @@ def solve(nx, ny):
     a = ufl.inner(eps * ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = f * v * ufl.dx
 
-    problem = fem.petsc.LinearProblem(
+    from dolfinx.fem.petsc import LinearProblem
+    problem = LinearProblem(
         a,
         L,
+        petsc_options_prefix="hrefinement_",
         bcs=[bc],
         petsc_options={
             "ksp_type": "cg",
@@ -60,7 +62,7 @@ def solve(nx, ny):
 
     # ---- Absolute error norms ----
     ue = fem.Function(V)
-    ue.interpolate(fem.Expression(u_exact, V.element.interpolation_points()))
+    ue.interpolate(fem.Expression(u_exact, V.element.interpolation_points))
     e = uh - ue
 
     abs_L2 = np.sqrt(fem.assemble_scalar(fem.form(e**2 * ufl.dx)))

@@ -9,5 +9,5 @@ fi
 
 docker run --rm ${TTY_FLAGS} \
   -v "$PWD":/app -w /app \
-  dolfinx/dolfinx:nightly \
+  ghcr.io/jorgensd/dolfinx_mpc:latest \
   sh -lc 'export PYTHONPATH="/app/src:${PYTHONPATH}"; /dolfinx-env/bin/python3 -u "$@"' -- "$@"

@@ -11,7 +11,7 @@ def solve(deg, n):
     V = fem.functionspace(domain, ("Lagrange", deg))
     x = ufl.SpatialCoordinate(domain)
     u_exact = ufl.sin(np.pi*x[0]) * ufl.sin(np.pi*x[1])
-    f = (deg*(deg+1)) * np.pi**2 * ufl.sin(np.pi*x[0]) * ufl.sin(np.pi*x[1])  # adjust amplitude
+    f = 2.0 * np.pi**2 * ufl.sin(np.pi*x[0]) * ufl.sin(np.pi*x[1])
     eps = fem.Constant(domain, 1.0)
 
     u_D = fem.Function(V); u_D.interpolate(fem.Expression(u_exact, V.element.interpolation_points))
@@ -19,11 +19,12 @@ def solve(deg, n):
     facets = mesh.locate_entities_boundary(domain, fdim,
                                            lambda X: np.full(X.shape[1], True))
     dofs = fem.locate_dofs_topological(V, fdim, facets)
-    bc = fem.dirichletbc(u_D, dofs, V)
+    bc = fem.dirichletbc(u_D, dofs)
     u = ufl.TrialFunction(V); v = ufl.TestFunction(V)
     a = ufl.inner(eps*ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = f * v * ufl.dx
-    problem = fem.petsc.LinearProblem(a, L, bcs=[bc])
+    from dolfinx.fem.petsc import LinearProblem
+    problem = LinearProblem(a, L, petsc_options_prefix=f"prefinement_p{deg}_", bcs=[bc])
     uh = problem.solve()
 
     ue = fem.Function(V)
