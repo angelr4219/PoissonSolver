@@ -1,0 +1,56 @@
+
+#############
+############# RunMDMM 
+############# Build_Date  : 2026-05-14 14:12:06 
+############# Build_ID    : eb9d3bf
+############# BLAS_type   : MKL
+############# FFTW_type   : FFTW3
+#############
+
+############# Start Time  :  15:52:35  : Fri Jul 17 2026
+
+
+#############
+############# Using XML parameter file : dotarray1disk2.xml
+#############
+
+
+#############
+############# Using OpenMP With 4 Threads
+#############
+
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+XXXXXXXXXX Creating target solution                XXXXXXXXXXX
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+Checking RunMDMM parameters
+Checking Device structure parameters
+Checking Poisson operator parameters
+Checking ImportExportSPiterate parameters
+Checking ComputationalSubdomains parameters
+Checking multidomain density operator parameters
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+XXXXXXXXXX Base potential construction             XXXXXXXXXXX
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+File : GlobalDevice/baseSurfacePotential.dat  (eV)
+File : GlobalDevice/baseBottomPotential.dat   (eV)
+
+File : GlobalDevice/basePotential3d.vtk      (eV)
+File : GlobalDevice/extendedBasePot3d.vtk  (eV)
+
+
+XXXX Base potential only calculation completed XXX 
+
+
+Target_Solution_Time_Min : 0.515753
+
+
+############# End   Time  :  15:53:06  : Fri Jul 17 2026
+
+
+XXXX Execution Complete XXXXX
+
+
