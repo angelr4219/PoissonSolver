@@ -42,6 +42,7 @@ PDE:
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 
 import gmsh
@@ -52,6 +53,9 @@ from mpi4py import MPI
 from dolfinx import default_scalar_type, fem, io, mesh as dmesh, geometry
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.io import gmsh as gmshio
+
+import dolfinx_mpc
+from dolfinx_mpc import LinearProblem as MPCLinearProblem
 
 
 EPS0 = 8.8541878128e-12
@@ -72,6 +76,15 @@ GATE1 = 21
 GATE2 = 22
 BACK_GATE = 30
 OUTER = 31
+
+# Periodic variant: the lateral sidewalls are split off from OUTER so that
+# they can carry a multi-point (periodic) constraint instead of a Dirichlet
+# condition, while the top of the air box keeps its Dirichlet value.
+TOP_AIR = 32
+LAT_XMIN = 33
+LAT_XMAX = 34
+LAT_YMIN = 35
+LAT_YMAX = 36
 IFACE_Z0 = 40
 IFACE_Z2 = 41
 IFACE_Z30 = 42
@@ -145,7 +158,230 @@ def parse_args():
         type=Path,
         default=Path("results/afm_layered_floating"),
     )
+    add_periodic_args(p)
     return p.parse_args()
+
+
+def add_periodic_args(ap):
+    """Flags that exist only in the periodic variant."""
+    ap.add_argument(
+        "--periodic-x",
+        action="store_true",
+        help="Impose phi(-Lx/2,y,z) = phi(+Lx/2,y,z).",
+    )
+    ap.add_argument(
+        "--periodic-y",
+        action="store_true",
+        help="Impose phi(x,-Ly/2,z) = phi(x,+Ly/2,z).",
+    )
+    ap.add_argument(
+        "--top-voltage",
+        type=float,
+        default=0.0,
+        help="Dirichlet potential on the top of the air box (z=-air_height).",
+    )
+    return ap
+
+
+def gmsh_pair_periodic_surfaces(a, groups):
+    """Pair opposite lateral Gmsh surfaces and impose an affine periodic mesh.
+
+    The geometry is fragmented into many dielectric volumes, so each lateral
+    side consists of several surfaces. Pairing is done on GEOMETRY (matching
+    z-extent and the in-plane extent), never on tag number.
+
+    Returns the list of pair records for the report.
+    """
+    pairs = []
+
+    def bbox(tag):
+        return gmsh.model.getBoundingBox(2, tag)
+
+    def match(slaves, masters, axis, shift):
+        # axis 0 -> periodic in x (compare y/z extents)
+        # axis 1 -> periodic in y (compare x/z extents)
+        out = []
+        used = set()
+        tol = 1e-6 * max(a.lx, a.ly, a.air_height, 1.0)
+
+        for sl in slaves:
+            bs = bbox(sl)
+            best = None
+
+            for ms in masters:
+                if ms in used:
+                    continue
+                bm = bbox(ms)
+                if axis == 0:
+                    d = (
+                        abs(bs[1] - bm[1]) + abs(bs[4] - bm[4])
+                        + abs(bs[2] - bm[2]) + abs(bs[5] - bm[5])
+                    )
+                else:
+                    d = (
+                        abs(bs[0] - bm[0]) + abs(bs[3] - bm[3])
+                        + abs(bs[2] - bm[2]) + abs(bs[5] - bm[5])
+                    )
+                if best is None or d < best[0]:
+                    best = (d, ms, bm)
+
+            if best is None:
+                raise RuntimeError(
+                    f"No periodic partner available for surface {sl}."
+                )
+
+            d, ms, bm = best
+            if d > tol:
+                raise RuntimeError(
+                    f"Periodic partner for surface {sl} is not geometrically "
+                    f"compatible (mismatch {d:g} > tol {tol:g}). "
+                    f"slave bbox={bs}, candidate master bbox={bm}"
+                )
+
+            used.add(ms)
+            out.append((sl, ms, bs, bm))
+
+        return out
+
+    affine_x = [
+        1, 0, 0, a.lx,
+        0, 1, 0, 0.0,
+        0, 0, 1, 0.0,
+        0, 0, 0, 1,
+    ]
+    affine_y = [
+        1, 0, 0, 0.0,
+        0, 1, 0, a.ly,
+        0, 0, 1, 0.0,
+        0, 0, 0, 1,
+    ]
+
+    plan = []
+    if a.periodic_x:
+        plan.append(("x", groups[LAT_XMAX], groups[LAT_XMIN], 0, affine_x))
+    if a.periodic_y:
+        plan.append(("y", groups[LAT_YMAX], groups[LAT_YMIN], 1, affine_y))
+
+    for direction, slaves, masters, axis, affine in plan:
+        if len(slaves) != len(masters):
+            raise RuntimeError(
+                f"Periodic {direction}: {len(slaves)} slave surfaces vs "
+                f"{len(masters)} master surfaces - cannot pair."
+            )
+
+        matched = match(slaves, masters, axis, affine)
+
+        for sl, ms, bs, bm in matched:
+            gmsh.model.mesh.setPeriodic(2, [sl], [ms], affine)
+            pairs.append(
+                {
+                    "direction": direction,
+                    "slave_surface": int(sl),
+                    "master_surface": int(ms),
+                    "slave_bbox": [float(v) for v in bs],
+                    "master_bbox": [float(v) for v in bm],
+                }
+            )
+
+    return pairs
+
+
+def build_periodic_mpc(V, a, bcs):
+    """True x/y periodicity via dolfinx_mpc.
+
+    Two-directional periodicity is handled WITHOUT chained or duplicated
+    constraints by splitting the slave sets:
+
+        x slave  : x = +Lx/2  EXCLUDING the y = +Ly/2 edge
+        y slave  : y = +Ly/2  EXCLUDING the x = +Lx/2 edge
+        corner   : x = +Lx/2 AND y = +Ly/2, mapped DIRECTLY to the
+                   opposite corner (-Lx/2, -Ly/2)
+
+    so no slave dof is ever the master of another slave. Dofs already owned by
+    a Dirichlet condition are passed in ``bcs`` and are excluded by MPC.
+    """
+    if not (a.periodic_x or a.periodic_y):
+        return None, {}
+
+    lx, ly = a.lx, a.ly
+    xmax, ymax = 0.5 * lx, 0.5 * ly
+    tol = 1e-6 * max(lx, ly)
+
+    at_xmax = lambda x: np.isclose(x[0], xmax, atol=tol)
+    at_ymax = lambda x: np.isclose(x[1], ymax, atol=tol)
+
+    mpc = dolfinx_mpc.MultiPointConstraint(V)
+    counts = {}
+    before = 0
+
+    def add(name, indicator, relation):
+        nonlocal before
+        mpc.create_periodic_constraint_geometrical(
+            V, indicator, relation, bcs, default_scalar_type(1.0)
+        )
+        # mpc.slaves is only available after finalize(); the accumulating
+        # internal list is what we can count per-constraint.
+        now = len(mpc._slaves)
+        counts[name] = int(now - before)
+        before = now
+
+    if a.periodic_x and a.periodic_y:
+        add(
+            "x_slave_dofs",
+            lambda x: at_xmax(x) & ~at_ymax(x),
+            lambda x: np.vstack([x[0] - lx, x[1], x[2]]),
+        )
+        add(
+            "y_slave_dofs",
+            lambda x: at_ymax(x) & ~at_xmax(x),
+            lambda x: np.vstack([x[0], x[1] - ly, x[2]]),
+        )
+        add(
+            "corner_slave_dofs",
+            lambda x: at_xmax(x) & at_ymax(x),
+            lambda x: np.vstack([x[0] - lx, x[1] - ly, x[2]]),
+        )
+    elif a.periodic_x:
+        add(
+            "x_slave_dofs",
+            at_xmax,
+            lambda x: np.vstack([x[0] - lx, x[1], x[2]]),
+        )
+        counts["y_slave_dofs"] = 0
+        counts["corner_slave_dofs"] = 0
+    else:
+        add(
+            "y_slave_dofs",
+            at_ymax,
+            lambda x: np.vstack([x[0], x[1] - ly, x[2]]),
+        )
+        counts["x_slave_dofs"] = 0
+        counts["corner_slave_dofs"] = 0
+
+    mpc.finalize()
+
+    comm = V.mesh.comm
+    glob = {
+        k: int(comm.allreduce(v, op=MPI.SUM)) for k, v in counts.items()
+    }
+    glob["total_slave_dofs"] = int(
+        comm.allreduce(int(mpc.num_local_slaves), op=MPI.SUM)
+    )
+
+    for key in ("x_slave_dofs", "y_slave_dofs", "corner_slave_dofs"):
+        expected = (
+            (key == "x_slave_dofs" and a.periodic_x)
+            or (key == "y_slave_dofs" and a.periodic_y)
+            or (key == "corner_slave_dofs" and a.periodic_x and a.periodic_y)
+        )
+        if expected and glob[key] == 0:
+            raise RuntimeError(
+                f"Periodic constraint produced ZERO {key}. The constraint was "
+                "not applied - refusing to continue with a silently "
+                "non-periodic problem."
+            )
+
+    return mpc, glob
 
 
 def device_bottom(a):
@@ -315,6 +551,11 @@ def classify_surfaces(a):
         GATE2: [],
         BACK_GATE: [],
         OUTER: [],
+        TOP_AIR: [],
+        LAT_XMIN: [],
+        LAT_XMAX: [],
+        LAT_YMIN: [],
+        LAT_YMAX: [],
         IFACE_Z0: [],
         IFACE_Z2: [],
         IFACE_Z30: [],
@@ -350,14 +591,34 @@ def classify_surfaces(a):
             groups[BACK_GATE].append(tag)
             continue
 
-        if (
-            plane(xmin, xmax, xmin_d, tol)
-            or plane(xmin, xmax, xmax_d, tol)
-            or plane(ymin, ymax, ymin_d, tol)
-            or plane(ymin, ymax, ymax_d, tol)
-            or plane(zmin, zmax, -a.air_height, tol)
-        ):
-            groups[OUTER].append(tag)
+        # Periodic variant: classify each outer face individually so the
+        # four sidewalls can be constrained periodically while the air-box
+        # top keeps its Dirichlet condition. OUTER is still populated with
+        # every one of them, so the non-periodic code path is unchanged.
+        lateral = None
+
+        if plane(xmin, xmax, xmin_d, tol):
+            lateral = LAT_XMIN
+        elif plane(xmin, xmax, xmax_d, tol):
+            lateral = LAT_XMAX
+        elif plane(ymin, ymax, ymin_d, tol):
+            lateral = LAT_YMIN
+        elif plane(ymin, ymax, ymax_d, tol):
+            lateral = LAT_YMAX
+
+        split_outer = bool(
+            getattr(a, "periodic_x", False)
+            or getattr(a, "periodic_y", False)
+        )
+
+        if lateral is not None:
+            # A facet can carry only ONE physical tag after gmshio import, so
+            # assign to the specific lateral group OR to OUTER, never both.
+            groups[lateral if split_outer else OUTER].append(tag)
+            continue
+
+        if plane(zmin, zmax, -a.air_height, tol):
+            groups[TOP_AIR if split_outer else OUTER].append(tag)
             continue
 
         matched = False
@@ -417,8 +678,17 @@ def classify_surfaces(a):
             )
         )
 
+    optional = {
+        OUTER,
+        TOP_AIR,
+        LAT_XMIN,
+        LAT_XMAX,
+        LAT_YMIN,
+        LAT_YMAX,
+    }
+
     for marker, tags in groups.items():
-        if not tags:
+        if not tags and marker not in optional:
             raise RuntimeError(
                 f"Facet group {marker} is empty."
             )
@@ -693,6 +963,11 @@ def build_gmsh(a, msh_path):
         GATE2: "floating_gate_2",
         BACK_GATE: "back_gate",
         OUTER: "outer",
+        TOP_AIR: "top_air",
+        LAT_XMIN: "lateral_xmin",
+        LAT_XMAX: "lateral_xmax",
+        LAT_YMIN: "lateral_ymin",
+        LAT_YMAX: "lateral_ymax",
         IFACE_Z0: "interface_z0",
         IFACE_Z2: "interface_z2",
         IFACE_Z30: "interface_z30",
@@ -702,12 +977,61 @@ def build_gmsh(a, msh_path):
     }
 
     for marker, tags in surface_groups.items():
+        if not tags:
+            continue
         add_group(
             2,
             tags,
             marker,
             surface_names[marker],
         )
+
+    # ------------------------------------------------------------------
+    # Gmsh periodic surface pairing (compatible meshes on opposite faces)
+    # ------------------------------------------------------------------
+
+    periodic_pairs = gmsh_pair_periodic_surfaces(a, surface_groups)
+
+    if periodic_pairs:
+        print(
+            f"\nGmsh periodic surface pairing: "
+            f"{len(periodic_pairs)} pair(s)"
+        )
+        print(
+            f"{'dir':>4} {'slave':>7} {'master':>7}   "
+            f"{'slave bbox (x0,y0,z0,x1,y1,z1)':<52} master bbox"
+        )
+        for r in periodic_pairs:
+            bs = ",".join(f"{v:.1f}" for v in r["slave_bbox"])
+            bm = ",".join(f"{v:.1f}" for v in r["master_bbox"])
+            print(
+                f"{r['direction']:>4} {r['slave_surface']:>7} "
+                f"{r['master_surface']:>7}   {bs:<52} {bm}"
+            )
+
+        out = Path(a.output)
+        out.mkdir(parents=True, exist_ok=True)
+        with (out / "periodic_surface_pairs.csv").open(
+            "w", newline=""
+        ) as fh:
+            w = csv.writer(fh)
+            w.writerow(
+                [
+                    "direction",
+                    "slave_surface",
+                    "master_surface",
+                    "slave_xmin", "slave_ymin", "slave_zmin",
+                    "slave_xmax", "slave_ymax", "slave_zmax",
+                    "master_xmin", "master_ymin", "master_zmin",
+                    "master_xmax", "master_ymax", "master_zmax",
+                ]
+            )
+            for r in periodic_pairs:
+                w.writerow(
+                    [r["direction"], r["slave_surface"], r["master_surface"]]
+                    + r["slave_bbox"] + r["master_bbox"]
+                )
+        print(f"wrote periodic_surface_pairs.csv")
 
     # ------------------------------------------------------------------
     # Mesh refinement near AFM and floating gates
@@ -918,7 +1242,14 @@ def tag_report(
         ("floating gate 2", GATE2),
         ("back gate", BACK_GATE),
         ("outer", OUTER),
+        ("top air", TOP_AIR),
+        ("lateral x-", LAT_XMIN),
+        ("lateral x+", LAT_XMAX),
+        ("lateral y-", LAT_YMIN),
+        ("lateral y+", LAT_YMAX),
     ]:
+        if count_owned(mesh, ft, marker) == 0:
+            continue
         rows.append(
             (
                 name,
@@ -1115,6 +1446,9 @@ def solve_dirichlet(
     outer_voltage,
     outer_neumann,
     prefix,
+    mpc=None,
+    periodic=False,
+    top_voltage=0.0,
 ):
     bcs = [
         make_bc(
@@ -1143,7 +1477,19 @@ def solve_dirichlet(
         ),
     ]
 
-    if not outer_neumann:
+    if periodic:
+        # Lateral walls carry the multi-point constraint, NOT a Dirichlet
+        # condition. The top of the air box keeps its Dirichlet value so that
+        # this case differs from the reference run only in the x/y treatment.
+        bcs.append(
+            make_bc(
+                V,
+                ft,
+                TOP_AIR,
+                top_voltage,
+            )
+        )
+    elif not outer_neumann:
         bcs.append(
             make_bc(
                 V,
@@ -1183,21 +1529,33 @@ def solve_dirichlet(
         * ufl.dx
     )
 
-    problem = LinearProblem(
-        lhs,
-        rhs,
-        bcs=bcs,
-        petsc_options_prefix=prefix,
-        petsc_options={
-            "ksp_type": "gmres",
-            "pc_type": "gamg",
-            "ksp_gmres_restart": 100,
-            "ksp_rtol": 1e-10,
-            "ksp_atol": 1e-12,
-            "ksp_max_it": 3000,
-            "ksp_error_if_not_converged": True,
-        },
-    )
+    petsc_opts = {
+        "ksp_type": "gmres",
+        "pc_type": "gamg",
+        "ksp_gmres_restart": 100,
+        "ksp_rtol": 1e-10,
+        "ksp_atol": 1e-12,
+        "ksp_max_it": 3000,
+        "ksp_error_if_not_converged": True,
+    }
+
+    if mpc is not None:
+        problem = MPCLinearProblem(
+            lhs,
+            rhs,
+            mpc,
+            bcs=bcs,
+            petsc_options_prefix=prefix,
+            petsc_options=petsc_opts,
+        )
+    else:
+        problem = LinearProblem(
+            lhs,
+            rhs,
+            bcs=bcs,
+            petsc_options_prefix=prefix,
+            petsc_options=petsc_opts,
+        )
 
     phi = problem.solve()
 
@@ -1294,6 +1652,7 @@ def solve_floating_case(
     tip_voltage,
     a,
     prefix,
+    mpc=None,
 ):
     base, iterations, reason = (
         solve_dirichlet(
@@ -1307,6 +1666,9 @@ def solve_floating_case(
             outer_voltage=a.outer_voltage,
             outer_neumann=a.outer_neumann,
             prefix=prefix,
+            mpc=mpc,
+            periodic=(a.periodic_x or a.periodic_y),
+            top_voltage=a.top_voltage,
         )
     )
 
@@ -1948,9 +2310,33 @@ def make_metadata(
             ),
             "outer_V": (
                 None
-                if a.outer_neumann
+                if (a.outer_neumann or a.periodic_x or a.periodic_y)
                 else a.outer_voltage
             ),
+            "top_air_V": a.top_voltage,
+        },
+
+        "boundary_conditions": {
+            "x": (
+                "periodic"
+                if a.periodic_x
+                else (
+                    "neumann"
+                    if a.outer_neumann
+                    else "dirichlet_%gV" % a.outer_voltage
+                )
+            ),
+            "y": (
+                "periodic"
+                if a.periodic_y
+                else (
+                    "neumann"
+                    if a.outer_neumann
+                    else "dirichlet_%gV" % a.outer_voltage
+                )
+            ),
+            "top_air": "dirichlet_%gV" % a.top_voltage,
+            "bottom": "dirichlet_%gV" % a.back_voltage,
         },
 
         "mesh": {
@@ -2226,6 +2612,65 @@ def main():
     )
 
     # ----------------------------------------------------------
+    # Periodic lateral boundary conditions (dolfinx_mpc)
+    # ----------------------------------------------------------
+
+    PERIODIC = bool(a.periodic_x or a.periodic_y)
+    mpc = None
+    mpc_counts = {}
+
+    if PERIODIC:
+        # Dirichlet dofs must be excluded from the periodic slave set.
+        mpc_bcs = [
+            make_bc(V, ft, AFM_TIP, 0.0),
+            make_bc(V, ft, GATE1, 0.0),
+            make_bc(V, ft, GATE2, 0.0),
+            make_bc(V, ft, BACK_GATE, 0.0),
+            make_bc(V, ft, TOP_AIR, 0.0),
+        ]
+
+        t_mpc = time.perf_counter()
+        mpc, mpc_counts = build_periodic_mpc(V, a, mpc_bcs)
+        t_mpc = time.perf_counter() - t_mpc
+
+        if comm.rank == 0:
+            print("\nPeriodic multi-point constraint:")
+            print(f"  periodic in x                  : {a.periodic_x}")
+            print(f"  periodic in y                  : {a.periodic_y}")
+            print(f"  global periodic x slave DOFs   : {mpc_counts['x_slave_dofs']}")
+            print(f"  global periodic y slave DOFs   : {mpc_counts['y_slave_dofs']}")
+            print(f"  global corner/edge slave DOFs  : {mpc_counts['corner_slave_dofs']}")
+            print(f"  total constrained slave DOFs   : {mpc_counts['total_slave_dofs']}")
+            print(f"  constraint build time          : {t_mpc:.2f} s")
+
+            rep_path = Path(a.output) / "periodic_boundary_report.txt"
+            rep_path.write_text(
+                "PERIODIC BOUNDARY REPORT\n"
+                "========================\n\n"
+                f"periodic_x                     : {a.periodic_x}\n"
+                f"periodic_y                     : {a.periodic_y}\n"
+                f"lx [nm]                        : {a.lx}\n"
+                f"ly [nm]                        : {a.ly}\n"
+                f"top of air box                 : Dirichlet {a.top_voltage} V\n"
+                f"bottom / back gate             : Dirichlet {a.back_voltage} V\n"
+                f"AFM tip                        : Dirichlet (swept)\n"
+                f"floating gates                 : Q1 = Q2 = 0 (solved)\n\n"
+                f"global periodic x slave DOFs   : {mpc_counts['x_slave_dofs']}\n"
+                f"global periodic y slave DOFs   : {mpc_counts['y_slave_dofs']}\n"
+                f"global corner/edge slave DOFs  : {mpc_counts['corner_slave_dofs']}\n"
+                f"total constrained slave DOFs   : {mpc_counts['total_slave_dofs']}\n"
+                f"constraint build time [s]      : {t_mpc:.3f}\n\n"
+                "Slave-set construction (no chained or duplicated constraints):\n"
+                "  x slave : x = +Lx/2 EXCLUDING the y = +Ly/2 edge\n"
+                "  y slave : y = +Ly/2 EXCLUDING the x = +Lx/2 edge\n"
+                "  corner  : x = +Lx/2 AND y = +Ly/2 mapped DIRECTLY to\n"
+                "            (-Lx/2, -Ly/2), never through another slave\n\n"
+                "Dirichlet dofs (tip, gates, back gate, air-box top) were passed\n"
+                "to MPC and are excluded from the periodic slave set.\n"
+            )
+            print(f"  wrote {rep_path.name}")
+
+    # ----------------------------------------------------------
     # Floating-gate influence basis
     # ----------------------------------------------------------
 
@@ -2250,6 +2695,9 @@ def main():
         outer_voltage=0,
         outer_neumann=a.outer_neumann,
         prefix="gate_basis_1_",
+        mpc=mpc,
+        periodic=PERIODIC,
+        top_voltage=a.top_voltage,
     )
 
     psi1.name = (
@@ -2271,6 +2719,9 @@ def main():
         outer_voltage=0,
         outer_neumann=a.outer_neumann,
         prefix="gate_basis_2_",
+        mpc=mpc,
+        periodic=PERIODIC,
+        top_voltage=a.top_voltage,
     )
 
     psi2.name = (
@@ -2399,6 +2850,7 @@ def main():
             tip_voltage=vt,
             a=a,
             prefix=f"tip_{label}_",
+            mpc=mpc,
         )
 
         phi = result[

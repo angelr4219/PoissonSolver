@@ -1189,9 +1189,8 @@ def solve_dirichlet(
         bcs=bcs,
         petsc_options_prefix=prefix,
         petsc_options={
-            "ksp_type": "gmres",
+            "ksp_type": "cg",
             "pc_type": "gamg",
-            "ksp_gmres_restart": 100,
             "ksp_rtol": 1e-10,
             "ksp_atol": 1e-12,
             "ksp_max_it": 3000,
