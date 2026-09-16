@@ -1,0 +1,35 @@
+Si/SiGe vertical two-gate electrostatics
+=================================================================
+
+Domain = 200.0 x 200.0 x 2053.0 nm
+
+VERTICAL STACK
+Si       : 0.0 -> 2.0 nm
+SiGe     : 2.0 -> 30.0 nm
+Si       : 30.0 -> 40.0 nm
+SiGe     : 40.0 -> 43.0 nm
+Si       : 43.0 -> 53.0 nm
+SiGe buf : 53.0 -> 2053.0 nm
+
+Gate 1 center = (0, 0, 35.0) nm
+Gate 1 radius = 10.0 nm
+Gate 1 voltage = 1.0 V
+
+Gate 2 center = (0, 0, 48.0) nm
+Gate 2 radius = 10.0 nm
+Gate 2 voltage = 0.0 V
+
+Bottom voltage = 0.0 V
+
+eps_r Si = 11.7
+eps_r SiGe = 12.0
+
+h_device = 3.0 nm
+h_bottom = 100.0 nm
+p = 1
+
+Cells = 511156
+DOFs = 91268
+phi_min = 0.000000000000e+00 V
+phi_max = 1.000000000000e+00 V
+Maximum principle = PASS

@@ -1,0 +1,24 @@
+Si/SiGe two-gate four-layer simulation
+============================================================
+
+Layer 1 thickness = 10.0 nm
+Layer 2 thickness = 3.0 nm
+Layer 3 thickness = 10.0 nm
+Layer 4 thickness = 2000.0 nm
+Total depth = 2023.0 nm
+
+epsilon_r = 12.0, 11.7, 12.0, 12.0
+
+Gate 1 voltage = 1.0 V
+Gate 2 voltage = 0.0 V
+Bottom voltage = 0.0 V
+
+h_top = 3.0 nm
+h_bottom = 100.0 nm
+p = 1
+
+Cells = 212044
+DOFs = 40560
+phi_min = 0.000000000000e+00 V
+phi_max = 1.000000000000e+00 V
+Layer 2 midpoint z = 11.5 nm
