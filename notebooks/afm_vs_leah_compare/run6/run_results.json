@@ -1,0 +1,74 @@
+{
+  "output": "notebooks/afm_vs_leah_compare/run6",
+  "geometry_nm": {
+    "lx": 300.0,
+    "ly": 300.0,
+    "air_height": 320.0,
+    "tip_gap": 10.0,
+    "tip_radius": 10.0,
+    "cone_height": 160.0,
+    "shank_radius": 120.0,
+    "cone_half_angle_deg_input": null,
+    "cone_half_angle_deg_effective": 34.5085229876684,
+    "shaft_radius": 120.0,
+    "shaft_height": 100.0,
+    "probe1_z": 35.0,
+    "probe2_z": 48.0,
+    "probe1_radius": 10.0,
+    "probe2_radius": 10.0,
+    "bottom_z": 2053.0
+  },
+  "voltages_V": {
+    "AFM_tip": 1.0,
+    "bottom_back_gate": -4.4,
+    "probe1": -1.0806660889040092,
+    "probe2": -1.088478802416102
+  },
+  "floating_gates": {
+    "V_g1_star": -1.0806660889040092,
+    "V_g2_star": -1.088478802416102,
+    "Q1_A": 19.652716457138496,
+    "Q2_A": 61.07438200057234,
+    "Q1_B": 262.0620865483236,
+    "Q2_B": -143.61089059997406,
+    "Q1_C": -242.12588529796028,
+    "Q2_C": 198.68995242646218,
+    "sanity_Q1_residual": -2.2130214327731323e-13,
+    "sanity_Q2_residual": 1.6042722705833512e-14,
+    "method": "exact linear superposition (3 aux solves + 2x2 linalg.solve), not iterative"
+  },
+  "materials": {
+    "eps_air": 1.0,
+    "eps_si": 11.7,
+    "eps_sige": 12.0
+  },
+  "mesh": {
+    "cells": 467621,
+    "dofs": 89527,
+    "degree": 1,
+    "h_apex_nm": 5.0,
+    "h_device_nm": 10.0,
+    "h_near_nm": 15.0,
+    "h_bottom_nm": 300.0
+  },
+  "solution": {
+    "phi_min_V": -4.399999999936444,
+    "phi_max_V": 1.0000000000648912,
+    "probe1": {
+      "name": "Probe 1",
+      "facets": 7,
+      "dofs": 8,
+      "min": -1.080666088938795,
+      "max": -1.0806660888678556,
+      "mean_nodal": -1.0806660889218467
+    },
+    "probe2": {
+      "name": "Probe 2",
+      "facets": 7,
+      "dofs": 8,
+      "min": -1.0884788024473675,
+      "max": -1.0884788023789078,
+      "mean_nodal": -1.0884788024147452
+    }
+  }
+}

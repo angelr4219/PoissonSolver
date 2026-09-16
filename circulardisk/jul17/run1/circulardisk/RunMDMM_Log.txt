@@ -1,0 +1,7 @@
+:  15:52:35  : Fri Jul 17 2026 :  RunMDMM 
+:  15:52:35  : RunMDMM program start 
+:  15:52:35  : Creating target solution 
+:  15:52:35  : Checking Parameters 
+:  15:52:57  : Base potential construction 
+:  15:53:06  : Execution Complete
+ 

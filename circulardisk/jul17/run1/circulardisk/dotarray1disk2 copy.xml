@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- XML_ParameterListArray -->
+<DotArray1_Parameters>
+    
+    <!-- 
+         Schroedinger-Poisson parameters for a model using a
+         single global subdomain and no subdomains
+         
+     -->
+    
+    <!-- Creation date : Fri Aug 22 07:43:31 2025 -->
+    
+    <RunParameters>
+        <OutputParameters>
+            <stateOutputCountMax value="5" type="long"/>
+            <waveFunSquaredPlotFlag value="true" type="bool"/>
+        </OutputParameters>
+        <SelfConsistentIteration>
+            <SCstopTolerance value="1.0e-6" type="double"/>
+        </SelfConsistentIteration>
+        <StabilizedRK>
+            <RKinitTimestep value="5.000e-01" type="double"/>
+            <RKmaxSteps value="1000" type="long"/>
+            <RKdegree value="10" type="long"/>
+            <verboseOutputFlag value="true" type="bool"/>
+        </StabilizedRK>
+        <plotFlag value="true" type="bool"/>
+        <screenProgressOutput value="true" type="bool"/>
+        <screenResultsOutput value="true" type="bool"/>
+        <basePotentialOnlyFlag  value="true" type="bool"/>
+        <selfConsistencyFlag  value="true" type="bool"/>
+        <threadCount value="4" type="long"/>
+    </RunParameters>
+    
+    <!--=============================-->
+    
+    <!--Specifying gate biases in volts-->
+    <GateBias>
+        <Base value="0.000e+00" type="double"/>
+        <Disk value="1.0" type="double"/>
+        <topBias1d value="0.000e+00" type="double"/>
+        <biasOffset value="0.000e+00" type="double"/>
+    </GateBias>
+    
+    <!--=============================-->
+    
+    <TransverseParameters>
+        <gateGeo2dFileName value="DotArray1_disk.cif" type="string"/>
+        <xPanelDensity value="0.2" type="double"/>
+        <yPanelDensity value="0.2" type="double"/>
+        <FFTquantizationFlag value="true" type="bool"/>
+        <gateSmoothingFlag value="false" type="bool"/>
+        <HRbasePotentialFlag value="false" type="bool"/>
+        <HRbasePotentialxPanelDensity value="0.2" type="double"/>
+        <HRbasePotentialyPanelDensity value="0.2" type="double"/>
+        <HRinterpolationDegree value="5" type="long"/>
+    </TransverseParameters>
+    
+    <!--=============================-->
+    
+    <GateSmoothingParameters>
+        <deltaFactor value="3" type="long"/>
+        <minimalDelta value="1.500e+01" type="double"/>
+        <minimalDeltaFlag value="false" type="bool"/>
+        <mollifierDiff value="6" type="long"/>
+        <mollifierOrder value="4" type="long"/>
+        <refineDegree value="3" type="long"/>
+        <refineFactor value="3" type="long"/>
+        <richardsonType value="24" type="long"/>
+    </GateSmoothingParameters>
+    
+    <!--=============================-->
+    
+    <InterfaceBCparameters>
+        <capGateDist value="5.000e+01" type="double"/>
+        <capMaterialName value="Vacuum" type="string"/>
+        <capZpanelDensity value="2.000e-01" type="double"/>
+        <interfaceBCflag value="true" type="bool"/>
+        <surfaceSrcDensity value="-2.00e+11" type="double"/>
+        <upperCapType value="INFINITE" type="string"/>
+        <!--upperCapType either DIRICHLET or INFINITE-->
+    </InterfaceBCparameters>
+    
+    <!--=============================-->
+    
+    <LowerSurfaceBoundaryConditions>
+        <bias value="12.0" type="double"/> <!-- 11.3 (3.04e11) -->
+        <botBiasType value="DIRICHLET" type="string"/>
+        <!--botBiasType either CLASSICAL or DIRICHLET-->
+    </LowerSurfaceBoundaryConditions>
+    
+    <!--=============================-->
+    
+    <ImportExportSPiterate>
+        <exportPhiStarFlag value="true" type="bool"/>
+        <importPhiStarFlag value="false" type="bool"/>
+        <phiStarFileName value="phiStar_binary.dat" type="string"/>
+    </ImportExportSPiterate>
+    
+    <!--=============================-->
+    
+    <SP_Parameters>
+        <energyTransitionDelta value="1.000e-03" type="double"/>
+        <fermiLevel value="0.000e+00" type="double"/>
+    </SP_Parameters>
+    
+    <!--=============================-->
+    
+    <PoissonSolver_NumericalParameters>
+        <ZapproxOrder value="4" type="long"/>
+        <iterativeInterfaceBC value="false" type="bool"/>
+        <verboseInterfaceBC value="false" type="bool"/>
+    </PoissonSolver_NumericalParameters>
+    
+    <!--=============================-->
+    
+    <SingleParticleEigensystemParameters>
+        <maxDegeneracy value="4" type="long"/>
+        <stopCondition value="RESIDUAL_ONLY" type="string"/>
+        <subspaceTol value="1.000e-12" type="double"/>
+        <verboseEigFlag value="false" type="bool"/>
+        <xyOpOrder value="4" type="long"/>
+        <zBasisSize value="10" type="long"/>
+        <zSplineDegree value="7" type="long"/>
+        <zSplinePanelDensity value="2.000e-01" type="double"/>
+        <plotVTK  value="true" type = "bool" />
+        <plotBinaryVLG  value="true"  type = "bool" />
+        <plotBinarySingleG  value="true" type = "bool" />
+    </SingleParticleEigensystemParameters>
+    
+    <!--=============================-->
+    
+    <MultiDomainParameters>
+        <Masking_Parameters>
+            <relativeTransitionWidth value="2.000e-01" type="double"/>
+        </Masking_Parameters>
+        <SubdomainFlags>
+            <snapBoundariesToGridFlag value="true" type="bool"/>
+        </SubdomainFlags>
+        <SubdomainInterpolation>
+            <degreeX value="4" type="long"/>
+            <degreeY value="4" type="long"/>
+            <degreeZ value="4" type="long"/>
+        </SubdomainInterpolation>
+        <SubdomainSmoothing>
+            <densitySmoothing value="false" type="bool"/>
+            <deltaXmeshFactor value="4" type="long"/>
+            <deltaYmeshFactor value="4" type="long"/>
+            <mollifierOrder value="2" type="long"/>
+            <mollifierDiff value="4" type="long"/>
+        </SubdomainSmoothing>
+    </MultiDomainParameters>
+    
+    <!--=============================-->
+    
+    <!--    GlobalSubdomain Calculation Types    -->
+    <!--   BULK_CLASSICAL or Q1D_X_CLASSICAL2D   -->
+    
+    <!--   Proper Subdomain Calculation Types  -->
+    <!-- BULK_CLASSICAL, Q1D_X_CLASSICAL2D, Q3D_PRODUCT_BASIS, Q3D_GRID3D_BASIS -->
+    
+    <!--   Proper Subdomain excludedPotentialType Types  -->
+    <!-- SUBDOMAIN or SUBDOMAIN_INF, FCI_SUBDOMAIN_INF, FCI_SUBDOMAIN -->
+    
+    <!--=============================-->
+    <ComputationalSubdomains>
+
+        <GlobalSubdomain>
+            <fixedChargeFlag value="false" type="bool"/>
+            <fixedChargeValue value="1.000e-03" type="double"/>
+            <occupancy value="2" type="long"/>
+            <calculationType value="Q1D_X_CLASSICAL2D" type="string"/>
+        </GlobalSubdomain>
+
+
+
+
+    </ComputationalSubdomains>
+    
+    <!--=============================-->
+    
+    <LayeredStructure>
+
+
+        <Layer>
+            <name value="Layer" type="string"/>
+            <materialType value="Si70Ge30" type="string"/>
+            <height value="50.0" type="double"/>
+            <panelDensity value="0.1" type="double"/>
+            <localWaveCalcType value="none" type="string"/>
+        </Layer>
+
+
+
+        <Layer>
+            <name value="q_layer_1" type="string"/>
+            <materialType value="sSi" type="string"/>
+            <height value="5.0" type="double"/>
+            <panelDensity value="1.0" type="double"/>
+            <localWaveCalcType value="quantum" type="string"/>
+        </Layer>
+
+
+
+        <Layer>
+            <name value="Layer" type="string"/>
+            <materialType value="Si70Ge30" type="string"/>
+            <height value="200.0" type="double"/>
+            <panelDensity value="0.5" type="double"/>
+            <localWaveCalcType value="none" type="string"/>
+        </Layer>
+
+
+
+        <baseLocation value="0.000e+00" type="double"/>
+        <uniformQwellGridFlag value="true" type="bool"/>
+    </LayeredStructure>
+    
+    <!--=============================-->
+    
+    <MaterialDataSource>
+        <materialSource value="MaterialList" type="string"/>
+    </MaterialDataSource>
+    
+    <!--=============================-->
+    
+    <MaterialList>
+        <Material>
+            <name value="sSi" type="string"/>
+            <dielectricConstant value="1.170e+01" type="double"/>
+            <effectiveMass_x value="1.990e-01" type="double"/>
+            <effectiveMass_y value="1.990e-01" type="double"/>
+            <effectiveMass_z value="8.950e-01" type="double"/>
+            <bandShift value="-2.350e-01" type="double"/>
+            <backgroundDopingDensity value="0.000e+00" type="double"/>
+        </Material>
+        <Material>
+            <name value="Si70Ge30" type="string"/>
+            <dielectricConstant value="1.305e+01" type="double"/>
+            <effectiveMass_x value="1.975e-01" type="double"/>
+            <effectiveMass_y value="1.975e-01" type="double"/>
+            <effectiveMass_z value="9.160e-01" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensity value="0.000e+00" type="double"/>
+        </Material>
+        <Material>
+            <name value="Vacuum" type="string"/>
+            <dielectricConstant value="1.000e+00" type="double"/>
+            <effectiveMass_x value="0.000e+00" type="double"/>
+            <effectiveMass_y value="0.000e+00" type="double"/>
+            <effectiveMass_z value="0.000e+00" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensity value="0.000e+00" type="double"/>
+        </Material>
+
+
+
+ 		<Material>
+            <name value="ALD" type="string"/>
+            <dielectricConstant value="2.900e+00" type="double"/>
+            <effectiveMass_x value="1.000e+00" type="double"/>
+            <effectiveMass_y value="1.000e+00" type="double"/>
+            <effectiveMass_z value="1.000e+00" type="double"/>
+            <bandShift value="1.000e+00" type="double"/>
+            <backgroundDopingDensity value="0.000e+00" type="double"/>
+        </Material>
+		<Material>
+            <name value="sSibuffer" type="string"/>
+            <dielectricConstant value="1.170e+01" type="double"/>
+            <effectiveMass_x value="1.990e-01" type="double"/>
+            <effectiveMass_y value="1.990e-01" type="double"/>
+            <effectiveMass_z value="8.950e-01" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensity value="0.000e+00" type="double"/>
+        </Material>
+         <Material>
+            <name value="Si70Ge30d" type="string"/>
+            <dielectricConstant value="1.305e+01" type="double"/>
+            <effectiveMass_x value="1.975e-01" type="double"/>
+            <effectiveMass_y value="1.975e-01" type="double"/>
+            <effectiveMass_z value="9.160e-01" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensityOrig value="1.000e+15" type="double"/>
+            <backgroundDopingDensity value="1.000e+17" type="double"/>
+        </Material>
+        <Material>
+            <name value="Si70Ge30dSubstrate" type="string"/>
+            <dielectricConstant value="1.305e+01" type="double"/>
+            <effectiveMass_x value="1.975e-01" type="double"/>
+            <effectiveMass_y value="1.975e-01" type="double"/>
+            <effectiveMass_z value="9.160e-01" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensity value="1.000e+16" type="double"/>
+        </Material>
+        <Material>
+            <name value="Si70Ge30bulkd" type="string"/>
+            <dielectricConstant value="1.305e+01" type="double"/>
+            <effectiveMass_x value="1.975e-01" type="double"/>
+            <effectiveMass_y value="1.975e-01" type="double"/>
+            <effectiveMass_z value="9.160e-01" type="double"/>
+            <bandShift value="0.000e+00" type="double"/>
+            <backgroundDopingDensity value="3.000e+17" type="double"/>
+        </Material>
+
+    </MaterialList>
+    
+    <!--=============================-->
+    
+</DotArray1_Parameters>
+

@@ -1,0 +1,61 @@
+{
+  "output": "notebooks/afm_vs_leah_compare/run3",
+  "geometry_nm": {
+    "lx": 300.0,
+    "ly": 300.0,
+    "air_height": 320.0,
+    "tip_gap": 10.0,
+    "tip_radius": 10.0,
+    "cone_height": 160.0,
+    "shank_radius": 120.0,
+    "cone_half_angle_deg_input": null,
+    "cone_half_angle_deg_effective": 34.5085229876684,
+    "shaft_radius": 120.0,
+    "shaft_height": 100.0,
+    "probe1_z": 35.0,
+    "probe2_z": 48.0,
+    "probe1_radius": 10.0,
+    "probe2_radius": 10.0,
+    "bottom_z": 2053.0
+  },
+  "voltages_V": {
+    "AFM_tip": 1.0,
+    "bottom_back_gate": -4.4,
+    "probe1": null,
+    "probe2": null
+  },
+  "materials": {
+    "eps_air": 1.0,
+    "eps_si": 11.7,
+    "eps_sige": 12.0
+  },
+  "mesh": {
+    "cells": 467621,
+    "dofs": 89527,
+    "degree": 1,
+    "h_apex_nm": 5.0,
+    "h_device_nm": 10.0,
+    "h_near_nm": 15.0,
+    "h_bottom_nm": 300.0
+  },
+  "solution": {
+    "phi_min_V": -4.399999999990645,
+    "phi_max_V": 1.0000000001082974,
+    "probe1": {
+      "name": "Probe 1",
+      "facets": 7,
+      "dofs": 8,
+      "min": -0.9617540744952741,
+      "max": -0.960471936407268,
+      "mean_nodal": -0.9615597334597068
+    },
+    "probe2": {
+      "name": "Probe 2",
+      "facets": 7,
+      "dofs": 8,
+      "min": -0.9981487202609662,
+      "max": -0.9974354849554427,
+      "mean_nodal": -0.9980400306710375
+    }
+  }
+}
